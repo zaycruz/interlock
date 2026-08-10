@@ -1,7 +1,7 @@
 import { posix, win32 } from "node:path";
 
 import { LeasePathError } from "./errors.js";
-import { isCaseInsensitiveGitRepository } from "./git-common-directory.js";
+import { isCaseInsensitiveFilesystem } from "./git-common-directory.js";
 
 const GLOB_CHARACTER = /[*?\[\]{}]/;
 
@@ -10,7 +10,7 @@ export function normalizeLeasePaths(repositoryPath: string, paths: string[]): st
     throw new LeasePathError("At least one path is required");
   }
 
-  const canonicalizeCase = isCaseInsensitiveGitRepository(repositoryPath);
+  const canonicalizeCase = isCaseInsensitiveFilesystem(repositoryPath);
   const normalizedPaths = paths.map((path) => normalizeLeasePath(path, canonicalizeCase)).sort();
   for (let index = 1; index < normalizedPaths.length; index += 1) {
     if (normalizedPaths[index] === normalizedPaths[index - 1]) {
@@ -48,5 +48,6 @@ function normalizeLeasePath(value: string, canonicalizeCase: boolean): string {
     throw new LeasePathError(`Path must be repository-relative: ${value}`);
   }
 
-  return canonicalizeCase ? normalizedPath.toLowerCase() : normalizedPath;
+  const unicodeNormalizedPath = normalizedPath.normalize("NFC");
+  return canonicalizeCase ? unicodeNormalizedPath.toLowerCase() : unicodeNormalizedPath;
 }

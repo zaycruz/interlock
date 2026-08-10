@@ -1,22 +1,35 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+
+import { assertSupportedPlatform } from "./platform.js";
 
 export function leaseDatabasePath(repositoryPath: string): string {
-  const repositoryRoot = gitOutput(repositoryPath, ["rev-parse", "--show-toplevel"]);
-  const commonDirectory = gitOutput(repositoryRoot, ["rev-parse", "--git-common-dir"]);
-  const databasePath = resolve(repositoryRoot, commonDirectory, "interlock", "leases.sqlite");
-
-  mkdirSync(dirname(databasePath), { recursive: true });
-  return databasePath;
+  return join(interlockDirectory(repositoryPath), "leases.sqlite");
 }
 
-export function isCaseInsensitiveGitRepository(repositoryPath: string): boolean {
+export function isCaseInsensitiveFilesystem(repositoryPath: string): boolean {
+  const directory = interlockDirectory(repositoryPath);
+  const probeName = `.case-sensitivity-${process.pid}-${randomUUID()}`;
+  const probePath = join(directory, probeName);
+
   try {
-    return gitOutput(repositoryPath, ["config", "--bool", "core.ignorecase"]) === "true";
-  } catch {
-    return false;
+    writeFileSync(probePath, "");
+    return existsSync(join(directory, probeName.toUpperCase()));
+  } finally {
+    rmSync(probePath, { force: true });
   }
+}
+
+function interlockDirectory(repositoryPath: string): string {
+  assertSupportedPlatform();
+  const repositoryRoot = gitOutput(repositoryPath, ["rev-parse", "--show-toplevel"]);
+  const commonDirectory = gitOutput(repositoryRoot, ["rev-parse", "--git-common-dir"]);
+  const directory = resolve(repositoryRoot, commonDirectory, "interlock");
+
+  mkdirSync(directory, { recursive: true });
+  return directory;
 }
 
 function gitOutput(repositoryPath: string, args: string[]): string {

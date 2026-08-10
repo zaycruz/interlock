@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+import { assertSupportedPlatform } from "./platform.js";
 import type { ProcessIdentity, ProcessInspector, ProcessStatus } from "./types.js";
 
 interface AvailableProcessStart {
@@ -11,7 +12,7 @@ interface AvailableProcessStart {
 
 type ProcessStart = AvailableProcessStart | { status: "dead" } | { status: "unknown" };
 
-const PS_LSTART = /^[A-Z][a-z]{2} [A-Z][a-z]{2}\s{1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
+const PS_LSTART = /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s{1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
 
 export function currentProcessIdentity(): ProcessIdentity {
   const start = processStart(process.pid);
@@ -34,6 +35,7 @@ export const inspectProcess: ProcessInspector = (identity): ProcessStatus => {
 };
 
 function processStart(pid: number): ProcessStart {
+  assertSupportedPlatform();
   return process.platform === "linux" ? linuxProcessStart(pid) : psProcessStart(pid);
 }
 
@@ -56,18 +58,27 @@ function linuxProcessStart(pid: number): ProcessStart {
 }
 
 function psProcessStart(pid: number): ProcessStart {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { status: "unknown" };
+  }
+
   const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
     encoding: "utf8",
     windowsHide: true,
   });
-  if (result.error !== undefined || result.status !== 0 || result.signal !== null) {
+  if (result.error !== undefined || result.signal !== null) {
+    return { status: "unknown" };
+  }
+
+  // Darwin ps reports a valid but absent PID as status 1 with no output on either stream.
+  if (result.status === 1 && result.stdout === "" && result.stderr === "") {
+    return { status: "dead" };
+  }
+  if (result.status !== 0 || result.stderr !== "") {
     return { status: "unknown" };
   }
 
   const startedAt = result.stdout.trim();
-  if (startedAt === "") {
-    return { status: "dead" };
-  }
   if (!PS_LSTART.test(startedAt)) {
     return { status: "unknown" };
   }

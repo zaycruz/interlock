@@ -1,5 +1,12 @@
 import type { LeaseCollision } from "./types.js";
 
+export class UnsupportedPlatformError extends Error {
+  constructor(platform: string) {
+    super(`Interlock V1 supports macOS and Linux only; received ${platform}.`);
+    this.name = "UnsupportedPlatformError";
+  }
+}
+
 export class LeasePathError extends Error {
   constructor(message: string) {
     super(message);

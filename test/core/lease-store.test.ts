@@ -6,6 +6,7 @@ import {
   LeaseCollisionError,
   LeaseOwnershipError,
   LeasePathError,
+  isCaseInsensitiveFilesystem,
   openLeaseStore,
   type ProcessInspector,
 } from "../../src/core/index.js";
@@ -96,18 +97,37 @@ test("rejects absolute paths, traversal, trailing separators, globs, and duplica
   store.close();
 });
 
-test("canonicalizes case aliases on a case-insensitive Git repository", () => {
+test("uses the Interlock filesystem probe instead of core.ignorecase for case aliases", () => {
   const testRepository = repository();
-  execFileSync("git", ["-C", testRepository.path, "config", "core.ignorecase", "true"]);
+  const caseInsensitive = isCaseInsensitiveFilesystem(testRepository.path);
+  execFileSync("git", ["-C", testRepository.path, "config", "core.ignorecase", caseInsensitive ? "false" : "true"]);
 
   const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
   store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+
+  const acquireCaseAlias = () => store.acquire({
+    workContractId: "contract-2",
+    owner: otherOwner,
+    paths: ["SRC/CORE/LEASE-STORE.TS"],
+  });
+  if (caseInsensitive) {
+    assert.throws(acquireCaseAlias, LeaseCollisionError);
+  } else {
+    assert.doesNotThrow(acquireCaseAlias);
+  }
+  store.close();
+});
+
+test("canonicalizes Unicode path aliases to NFC", () => {
+  const testRepository = repository();
+  const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
+  store.acquire({ workContractId: "contract-1", owner, paths: ["src/café.ts"] });
 
   assert.throws(
     () => store.acquire({
       workContractId: "contract-2",
       owner: otherOwner,
-      paths: ["SRC/CORE/LEASE-STORE.TS"],
+      paths: ["src/cafe\u0301.ts"],
     }),
     LeaseCollisionError,
   );
