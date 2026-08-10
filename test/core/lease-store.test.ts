@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { chmodSync } from "node:fs";
 import { afterEach, test } from "node:test";
 
 import {
@@ -116,6 +117,27 @@ test("uses the Interlock filesystem probe instead of core.ignorecase for case al
     assert.doesNotThrow(acquireCaseAlias);
   }
   store.close();
+});
+
+test("prevents case-alias collisions when the worktree filesystem cannot be probed", () => {
+  const testRepository = repository();
+  const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
+
+  chmodSync(testRepository.path, 0o555);
+  try {
+    store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+    assert.throws(
+      () => store.acquire({
+        workContractId: "contract-2",
+        owner: otherOwner,
+        paths: ["SRC/CORE/LEASE-STORE.TS"],
+      }),
+      LeaseCollisionError,
+    );
+  } finally {
+    chmodSync(testRepository.path, 0o755);
+    store.close();
+  }
 });
 
 test("canonicalizes Unicode path aliases to NFC", () => {

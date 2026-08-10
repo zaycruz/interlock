@@ -10,8 +10,20 @@
     "linux"
   ],
   "type": "module",
+  "main": "./dist/src/core/index.js",
+  "types": "./dist/src/core/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/core/index.d.ts",
+      "import": "./dist/src/core/index.js"
+    }
+  },
+  "files": [
+    "dist/src/core"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/core/*.test.js",
     "test:core": "npm run build && node --test dist/test/core/*.test.js"

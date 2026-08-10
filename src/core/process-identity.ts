@@ -36,15 +36,37 @@ export const inspectProcess: ProcessInspector = (identity): ProcessStatus => {
 
 function processStart(pid: number): ProcessStart {
   assertSupportedPlatform();
+
+  const existence = processExistence(pid);
+  if (existence === "absent") {
+    return { status: "dead" };
+  }
+  if (existence === "unknown") {
+    return { status: "unknown" };
+  }
+
   return process.platform === "linux" ? linuxProcessStart(pid) : psProcessStart(pid);
+}
+
+function processExistence(pid: number): "present" | "absent" | "unknown" {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return "unknown";
+  }
+
+  try {
+    process.kill(pid, 0);
+    return "present";
+  } catch (error: unknown) {
+    return errorCode(error) === "ESRCH" ? "absent" : "unknown";
+  }
 }
 
 function linuxProcessStart(pid: number): ProcessStart {
   let stat: string;
   try {
     stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-  } catch (error: unknown) {
-    return isNotFoundError(error) ? { status: "dead" } : { status: "unknown" };
+  } catch {
+    return { status: "unknown" };
   }
 
   const closingName = stat.lastIndexOf(")");
@@ -70,10 +92,6 @@ function psProcessStart(pid: number): ProcessStart {
     return { status: "unknown" };
   }
 
-  // Darwin ps reports a valid but absent PID as status 1 with no output on either stream.
-  if (result.status === 1 && result.stdout === "" && result.stderr === "") {
-    return { status: "dead" };
-  }
   if (result.status !== 0 || result.stderr !== "") {
     return { status: "unknown" };
   }
@@ -86,6 +104,8 @@ function psProcessStart(pid: number): ProcessStart {
   return { status: "available", precision: "weak", startedAt: `ps:${startedAt}` };
 }
 
-function isNotFoundError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined;
 }

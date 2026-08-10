@@ -13,21 +13,20 @@ test("uses a strong identity for the current Linux process", { skip: process.pla
   assert.equal(inspectProcess(identity), "alive");
 });
 
-test("treats only the normal Darwin no-process ps result as dead", { skip: process.platform !== "darwin" }, () => {
-  withFakePs("#!/bin/sh\nexit 1\n", () => {
-    assert.equal(inspectProcess({ pid: 99_998, startedAt: "ps:irrelevant" }), "dead");
-  });
+test("classifies an absent Darwin PID as dead from the signal-zero probe", { skip: process.platform !== "darwin" }, () => {
+  assert.equal(inspectProcess({ pid: 99_998, startedAt: "ps:irrelevant" }), "dead");
 });
 
-test("retains Darwin leases when ps inspection is invalid, signaled, malformed, locale-dependent, or unavailable", { skip: process.platform !== "darwin" }, () => {
+test("retains Darwin leases when ps identity inspection is silent, invalid, signaled, malformed, locale-dependent, or unavailable", { skip: process.platform !== "darwin" }, () => {
   for (const script of [
+    "#!/bin/sh\nexit 1\n",
     "#!/bin/sh\nprintf 'ps: Invalid process id: 999999\\n' >&2\nexit 1\n",
     "#!/bin/sh\nkill -TERM $$\n",
     "#!/bin/sh\nprintf 'not a process start\\n'\nexit 1\n",
     "#!/bin/sh\nprintf 'Lun Jan  1 00:00:00 2026\\n'\n",
   ]) {
     withFakePs(script, () => {
-      assert.equal(inspectProcess({ pid: 99_998, startedAt: "ps:irrelevant" }), "unknown");
+      assert.equal(inspectProcess({ pid: process.pid, startedAt: "ps:irrelevant" }), "unknown");
     });
   }
 
@@ -38,7 +37,7 @@ test("retains Darwin leases when ps inspection is invalid, signaled, malformed, 
   const originalPath = process.env.PATH;
   try {
     process.env.PATH = "/interlock-missing-ps";
-    assert.equal(inspectProcess({ pid: 99_998, startedAt: "ps:irrelevant" }), "unknown");
+    assert.equal(inspectProcess({ pid: process.pid, startedAt: "ps:irrelevant" }), "unknown");
   } finally {
     process.env.PATH = originalPath;
   }
