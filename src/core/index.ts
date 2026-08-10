@@ -1,0 +1,26 @@
+export {
+  LeaseCollisionError,
+  LeaseOwnershipError,
+  LeasePathError,
+  WorkContractExistsError,
+  WorkContractNotFoundError,
+} from "./errors.js";
+export { leaseDatabasePath } from "./git-common-directory.js";
+export { currentProcessIdentity, inspectProcess } from "./process-identity.js";
+export { openLeaseStore, SqliteLeaseStore } from "./lease-store.js";
+export type {
+  AcquireLeaseInput,
+  HeartbeatState,
+  LeaseCollision,
+  LeaseOwner,
+  LeaseState,
+  LeaseStore,
+  LeaseStoreOptions,
+  ProcessIdentity,
+  ProcessInspector,
+  ProcessStatus,
+  ReclaimedWorkContract,
+  RetainedWorkContract,
+  StaleSessionReconciliation,
+  WorkContractOwnerInput,
+} from "./types.js";
