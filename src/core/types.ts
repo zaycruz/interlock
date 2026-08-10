@@ -1,4 +1,4 @@
-export type ProcessStatus = "alive" | "dead" | "mismatched" | "unknown";
+export type ProcessStatus = "alive" | "dead" | "mismatched" | "ambiguous" | "unknown";
 
 export interface ProcessIdentity {
   pid: number;
@@ -48,7 +48,7 @@ export interface ReclaimedWorkContract {
 
 export interface RetainedWorkContract {
   workContractId: string;
-  processStatus: "alive" | "unknown";
+  processStatus: "alive" | "ambiguous" | "unknown";
   heartbeatState: HeartbeatState;
 }
 

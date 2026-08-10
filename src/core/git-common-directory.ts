@@ -11,6 +11,14 @@ export function leaseDatabasePath(repositoryPath: string): string {
   return databasePath;
 }
 
+export function isCaseInsensitiveGitRepository(repositoryPath: string): boolean {
+  try {
+    return gitOutput(repositoryPath, ["config", "--bool", "core.ignorecase"]) === "true";
+  } catch {
+    return false;
+  }
+}
+
 function gitOutput(repositoryPath: string, args: string[]): string {
   return execFileSync("git", ["-C", repositoryPath, ...args], { encoding: "utf8" }).trim();
 }

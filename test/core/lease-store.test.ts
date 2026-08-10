@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { afterEach, test } from "node:test";
 
 import {
@@ -72,7 +73,7 @@ test("acquires normalized repository-relative paths in the Git common directory"
   store.close();
 });
 
-test("rejects absolute paths, traversal, globs, and duplicate normalized paths", () => {
+test("rejects absolute paths, traversal, trailing separators, globs, and duplicate normalized paths", () => {
   const testRepository = repository();
   const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
 
@@ -81,6 +82,8 @@ test("rejects absolute paths, traversal, globs, and duplicate normalized paths",
     ["C:\\tmp\\file.ts"],
     ["C:tmp\\file.ts"],
     ["src/../file.ts"],
+    ["src/directory/"],
+    ["src\\directory\\"],
     ["src/*.ts"],
     ["src//file.ts", "src/file.ts"],
   ]) {
@@ -90,6 +93,24 @@ test("rejects absolute paths, traversal, globs, and duplicate normalized paths",
     );
   }
 
+  store.close();
+});
+
+test("canonicalizes case aliases on a case-insensitive Git repository", () => {
+  const testRepository = repository();
+  execFileSync("git", ["-C", testRepository.path, "config", "core.ignorecase", "true"]);
+
+  const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
+  store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+
+  assert.throws(
+    () => store.acquire({
+      workContractId: "contract-2",
+      owner: otherOwner,
+      paths: ["SRC/CORE/LEASE-STORE.TS"],
+    }),
+    LeaseCollisionError,
+  );
   store.close();
 });
 
@@ -137,6 +158,28 @@ test("heartbeats only the owning work contract", () => {
     () => store.heartbeat({ workContractId: "contract-1", owner: otherOwner }),
     LeaseOwnershipError,
   );
+  store.close();
+});
+
+test("reads a complete work contract with its leased paths", () => {
+  const testRepository = repository();
+  const store = openLeaseStore(testRepository.path, {
+    clock: () => 100,
+    processInspector: inspector("alive"),
+  });
+  store.acquire({
+    workContractId: "contract-1",
+    owner,
+    paths: ["src/core/lease-store.ts", "test/core/lease-store.test.ts"],
+  });
+
+  assert.deepEqual(store.getWorkContract("contract-1"), {
+    workContractId: "contract-1",
+    owner,
+    paths: ["src/core/lease-store.ts", "test/core/lease-store.test.ts"],
+    acquiredAt: 100,
+    heartbeatAt: 100,
+  });
   store.close();
 });
 
@@ -198,6 +241,29 @@ test("reclaims a dead collision while atomically acquiring a new contract", () =
 
   assert.equal(lease.workContractId, "contract-2");
   assert.equal(store.getWorkContract("contract-1"), undefined);
+  store.close();
+});
+
+test("retains an expired lease when process identity is ambiguous", () => {
+  const testRepository = repository();
+  let now = 100;
+  const store = openLeaseStore(testRepository.path, {
+    clock: () => now,
+    staleAfterMs: 50,
+    processInspector: inspector("ambiguous"),
+  });
+  store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+
+  now = 200;
+  const reconciliation = store.reconcileStaleSessions();
+
+  assert.deepEqual(reconciliation.released, []);
+  assert.deepEqual(reconciliation.retained, [{
+    workContractId: "contract-1",
+    processStatus: "ambiguous",
+    heartbeatState: "expired",
+  }]);
+  assert.notEqual(store.getWorkContract("contract-1"), undefined);
   store.close();
 });
 
