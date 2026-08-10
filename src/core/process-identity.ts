@@ -86,6 +86,7 @@ function psProcessStart(pid: number): ProcessStart {
 
   const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
     encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C" },
     windowsHide: true,
   });
   if (result.error !== undefined || result.signal !== null) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,17 @@ test("uses a strong identity for the current Linux process", { skip: process.pla
 
 test("classifies an absent Darwin PID as dead from the signal-zero probe", { skip: process.platform !== "darwin" }, () => {
   assert.equal(inspectProcess({ pid: 99_998, startedAt: "ps:irrelevant" }), "dead");
+});
+
+test("runs Darwin ps with the C locale", { skip: process.platform !== "darwin" }, () => {
+  withFakePs(
+    "#!/bin/sh\nprintf '%s' \"$LC_ALL\" > \"$INTERLOCK_TEST_LOCALE_PATH\"\nprintf 'Mon Jan  1 00:00:00 2026\\n'\n",
+    (directory) => {
+      process.env.INTERLOCK_TEST_LOCALE_PATH = join(directory, "locale");
+      assert.deepEqual(currentProcessIdentity(), { pid: process.pid, startedAt: "ps:Mon Jan  1 00:00:00 2026" });
+      assert.equal(readFileSync(process.env.INTERLOCK_TEST_LOCALE_PATH, "utf8"), "C");
+    },
+  );
 });
 
 test("retains Darwin leases when ps identity inspection is silent, invalid, signaled, malformed, locale-dependent, or unavailable", { skip: process.platform !== "darwin" }, () => {
@@ -43,18 +54,20 @@ test("retains Darwin leases when ps identity inspection is silent, invalid, sign
   }
 });
 
-function withFakePs(script: string, run: () => void): void {
+function withFakePs(script: string, run: (directory: string) => void): void {
   const directory = mkdtempSync(join(tmpdir(), "interlock-fake-ps-"));
   const commandPath = join(directory, "ps");
   const originalPath = process.env.PATH;
+  const originalLocalePath = process.env.INTERLOCK_TEST_LOCALE_PATH;
 
   try {
     writeFileSync(commandPath, script, { mode: 0o755 });
     chmodSync(commandPath, 0o755);
     process.env.PATH = directory;
-    run();
+    run(directory);
   } finally {
     process.env.PATH = originalPath;
+    process.env.INTERLOCK_TEST_LOCALE_PATH = originalLocalePath;
     rmSync(directory, { recursive: true, force: true });
   }
 }

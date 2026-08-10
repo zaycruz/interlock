@@ -47,13 +47,11 @@ export class SqliteLeaseStore implements LeaseStore {
   readonly databasePath: string;
 
   private readonly database: Database.Database;
-  private readonly repositoryPath: string;
   private readonly clock: () => number;
   private readonly processInspector: (identity: ProcessIdentity) => ProcessStatus;
   private readonly staleAfterMs: number;
 
   constructor(repositoryPath: string, options: LeaseStoreOptions = {}) {
-    this.repositoryPath = repositoryPath;
     this.databasePath = leaseDatabasePath(repositoryPath);
     this.database = new Database(this.databasePath);
     this.clock = options.clock ?? Date.now;
@@ -71,7 +69,7 @@ export class SqliteLeaseStore implements LeaseStore {
 
   acquire(input: AcquireLeaseInput): LeaseState {
     validateAcquireInput(input);
-    const paths = normalizeLeasePaths(this.repositoryPath, input.paths);
+    const paths = normalizeLeasePaths(input.paths);
 
     return this.database.transaction(() => {
       this.reconcileStaleSessionsInTransaction();

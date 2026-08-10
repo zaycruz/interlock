@@ -1,17 +1,15 @@
 import { posix, win32 } from "node:path";
 
 import { LeasePathError } from "./errors.js";
-import { isCaseInsensitiveFilesystem } from "./git-common-directory.js";
 
 const GLOB_CHARACTER = /[*?\[\]{}]/;
 
-export function normalizeLeasePaths(repositoryPath: string, paths: string[]): string[] {
+export function normalizeLeasePaths(paths: string[]): string[] {
   if (paths.length === 0) {
     throw new LeasePathError("At least one path is required");
   }
 
-  const canonicalizeCase = isCaseInsensitiveFilesystem(repositoryPath);
-  const normalizedPaths = paths.map((path) => normalizeLeasePath(path, canonicalizeCase)).sort();
+  const normalizedPaths = paths.map(normalizeLeasePath).sort();
   for (let index = 1; index < normalizedPaths.length; index += 1) {
     if (normalizedPaths[index] === normalizedPaths[index - 1]) {
       throw new LeasePathError(`Duplicate path: ${normalizedPaths[index]}`);
@@ -21,7 +19,7 @@ export function normalizeLeasePaths(repositoryPath: string, paths: string[]): st
   return normalizedPaths;
 }
 
-function normalizeLeasePath(value: string, canonicalizeCase: boolean): string {
+function normalizeLeasePath(value: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new LeasePathError("Each path must be a non-empty string");
   }
@@ -48,6 +46,5 @@ function normalizeLeasePath(value: string, canonicalizeCase: boolean): string {
     throw new LeasePathError(`Path must be repository-relative: ${value}`);
   }
 
-  const unicodeNormalizedPath = normalizedPath.normalize("NFC");
-  return canonicalizeCase ? unicodeNormalizedPath.toLowerCase() : unicodeNormalizedPath;
+  return normalizedPath.normalize("NFC").toLowerCase();
 }

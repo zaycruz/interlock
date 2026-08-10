@@ -6,7 +6,7 @@ export {
   WorkContractExistsError,
   WorkContractNotFoundError,
 } from "./errors.js";
-export { isCaseInsensitiveFilesystem, leaseDatabasePath } from "./git-common-directory.js";
+export { leaseDatabasePath } from "./git-common-directory.js";
 export { assertSupportedPlatform } from "./platform.js";
 export { currentProcessIdentity, inspectProcess } from "./process-identity.js";
 export { openLeaseStore, SqliteLeaseStore } from "./lease-store.js";
