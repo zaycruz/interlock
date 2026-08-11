@@ -17,15 +17,22 @@ test("classifies an absent Darwin PID as dead from the signal-zero probe", { ski
   assert.equal(inspectProcess({ pid: 99_998, startedAt: "ps:irrelevant" }), "dead");
 });
 
-test("runs Darwin ps with the C locale", { skip: process.platform !== "darwin" }, () => {
-  withFakePs(
-    "#!/bin/sh\nprintf '%s' \"$LC_ALL\" > \"$INTERLOCK_TEST_LOCALE_PATH\"\nprintf 'Mon Jan  1 00:00:00 2026\\n'\n",
-    (directory) => {
-      process.env.INTERLOCK_TEST_LOCALE_PATH = join(directory, "locale");
-      assert.deepEqual(currentProcessIdentity(), { pid: process.pid, startedAt: "ps:Mon Jan  1 00:00:00 2026" });
-      assert.equal(readFileSync(process.env.INTERLOCK_TEST_LOCALE_PATH, "utf8"), "C");
-    },
-  );
+test("runs Darwin ps with fixed C locale and UTC time zone", { skip: process.platform !== "darwin" }, () => {
+  const originalTimeZone = process.env.TZ;
+
+  try {
+    withFakePs(
+      "#!/bin/sh\nprintf '%s\\n%s' \"$LC_ALL\" \"$TZ\" > \"$INTERLOCK_TEST_LOCALE_PATH\"\nprintf 'Mon Jan  1 00:00:00 2026\\n'\n",
+      (directory) => {
+        process.env.TZ = "Pacific/Honolulu";
+        process.env.INTERLOCK_TEST_LOCALE_PATH = join(directory, "locale");
+        assert.deepEqual(currentProcessIdentity(), { pid: process.pid, startedAt: "ps:Mon Jan  1 00:00:00 2026" });
+        assert.equal(readFileSync(process.env.INTERLOCK_TEST_LOCALE_PATH, "utf8"), "C\nUTC");
+      },
+    );
+  } finally {
+    process.env.TZ = originalTimeZone;
+  }
 });
 
 test("retains Darwin leases when ps identity inspection is silent, invalid, signaled, malformed, locale-dependent, or unavailable", { skip: process.platform !== "darwin" }, () => {
