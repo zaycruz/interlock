@@ -22,6 +22,7 @@ import type {
   ReclaimedWorkContract,
   RetainedWorkContract,
   StaleSessionReconciliation,
+  UninspectedWorkContract,
   WorkContractOwnerInput,
 } from "./types.js";
 
@@ -187,12 +188,20 @@ export class SqliteLeaseStore implements LeaseStore {
 
   private reconcileStaleSessionsInTransaction(): StaleSessionReconciliation {
     const released: ReclaimedWorkContract[] = [];
-    const retained: RetainedWorkContract[] = [];
+    const retained: Array<RetainedWorkContract | UninspectedWorkContract> = [];
     const contracts = this.database.prepare("SELECT * FROM work_contracts ORDER BY work_contract_id").all() as WorkContractRow[];
 
     for (const contract of contracts) {
-      const processStatus = this.processInspector(processIdentity(contract));
       const heartbeatState = this.heartbeatState(contract.heartbeat_at);
+      if (heartbeatState === "fresh") {
+        retained.push({
+          workContractId: contract.work_contract_id,
+          heartbeatState,
+        });
+        continue;
+      }
+
+      const processStatus = this.processInspector(processIdentity(contract));
       if (processStatus === "dead" || processStatus === "mismatched") {
         const paths = this.pathsFor(contract.work_contract_id);
         this.database.prepare("DELETE FROM work_contracts WHERE work_contract_id = ?").run(contract.work_contract_id);

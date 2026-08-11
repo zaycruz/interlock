@@ -256,6 +256,35 @@ test("releases every path in an owned work contract", () => {
   store.close();
 });
 
+for (const expectedInspectionResult of ["dead", "mismatched"] as const) {
+  test(`does not inspect or reclaim a fresh heartbeat when an inspector would report ${expectedInspectionResult}`, () => {
+    const testRepository = repository();
+    const inspected: typeof owner.process[] = [];
+    const store = openLeaseStore(testRepository.path, {
+      clock: () => 100,
+      staleAfterMs: 50,
+      processInspector: (process) => {
+        inspected.push(process);
+        return expectedInspectionResult;
+      },
+    });
+    store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+
+    const reconciliation = store.reconcileStaleSessions();
+
+    assert.deepEqual(inspected, []);
+    assert.deepEqual(reconciliation, {
+      released: [],
+      retained: [{
+        workContractId: "contract-1",
+        heartbeatState: "fresh",
+      }],
+    });
+    assert.notEqual(store.getWorkContract("contract-1"), undefined);
+    store.close();
+  });
+}
+
 test("reclaims a heartbeat-expired lease only when its recorded process is verified dead", () => {
   const testRepository = repository();
   let now = 100;
@@ -273,6 +302,29 @@ test("reclaims a heartbeat-expired lease only when its recorded process is verif
     workContractId: "contract-1",
     paths: ["src/core/lease-store.ts"],
     processStatus: "dead",
+    heartbeatState: "expired",
+  }]);
+  assert.equal(store.getWorkContract("contract-1"), undefined);
+  store.close();
+});
+
+test("reclaims a heartbeat-expired lease when its process identity is mismatched", () => {
+  const testRepository = repository();
+  let now = 100;
+  const store = openLeaseStore(testRepository.path, {
+    clock: () => now,
+    staleAfterMs: 50,
+    processInspector: inspector("mismatched"),
+  });
+  store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+
+  now = 200;
+  const reconciliation = store.reconcileStaleSessions();
+
+  assert.deepEqual(reconciliation.released, [{
+    workContractId: "contract-1",
+    paths: ["src/core/lease-store.ts"],
+    processStatus: "mismatched",
     heartbeatState: "expired",
   }]);
   assert.equal(store.getWorkContract("contract-1"), undefined);
@@ -298,6 +350,29 @@ test("reclaims a dead collision while atomically acquiring a new contract", () =
 
   assert.equal(lease.workContractId, "contract-2");
   assert.equal(store.getWorkContract("contract-1"), undefined);
+  store.close();
+});
+
+test("retains an expired lease when its process is alive", () => {
+  const testRepository = repository();
+  let now = 100;
+  const store = openLeaseStore(testRepository.path, {
+    clock: () => now,
+    staleAfterMs: 50,
+    processInspector: inspector("alive"),
+  });
+  store.acquire({ workContractId: "contract-1", owner, paths: ["src/core/lease-store.ts"] });
+
+  now = 200;
+  const reconciliation = store.reconcileStaleSessions();
+
+  assert.deepEqual(reconciliation.released, []);
+  assert.deepEqual(reconciliation.retained, [{
+    workContractId: "contract-1",
+    processStatus: "alive",
+    heartbeatState: "expired",
+  }]);
+  assert.notEqual(store.getWorkContract("contract-1"), undefined);
   store.close();
 });
 

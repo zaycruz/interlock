@@ -43,18 +43,23 @@ export interface ReclaimedWorkContract {
   workContractId: string;
   paths: string[];
   processStatus: "dead" | "mismatched";
-  heartbeatState: HeartbeatState;
+  heartbeatState: "expired";
 }
 
 export interface RetainedWorkContract {
   workContractId: string;
   processStatus: "alive" | "ambiguous" | "unknown";
-  heartbeatState: HeartbeatState;
+  heartbeatState: "expired";
+}
+
+export interface UninspectedWorkContract {
+  workContractId: string;
+  heartbeatState: "fresh";
 }
 
 export interface StaleSessionReconciliation {
   released: ReclaimedWorkContract[];
-  retained: RetainedWorkContract[];
+  retained: Array<RetainedWorkContract | UninspectedWorkContract>;
 }
 
 export type ProcessInspector = (process: ProcessIdentity) => ProcessStatus;

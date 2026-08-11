@@ -24,5 +24,6 @@ export type {
   ReclaimedWorkContract,
   RetainedWorkContract,
   StaleSessionReconciliation,
+  UninspectedWorkContract,
   WorkContractOwnerInput,
 } from "./types.js";
