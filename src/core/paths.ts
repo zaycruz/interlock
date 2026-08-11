@@ -1,5 +1,7 @@
 import { posix, win32 } from "node:path";
 
+import { caseFold } from "unicode-case-folding";
+
 import { LeasePathError } from "./errors.js";
 
 const GLOB_CHARACTER = /[*?\[\]{}]/;
@@ -46,5 +48,5 @@ function normalizeLeasePath(value: string): string {
     throw new LeasePathError(`Path must be repository-relative: ${value}`);
   }
 
-  return normalizedPath.normalize("NFC").toLowerCase();
+  return caseFold(normalizedPath.normalize("NFC")).normalize("NFC");
 }

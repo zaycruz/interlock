@@ -133,6 +133,44 @@ test("canonicalizes Unicode path aliases to NFC", () => {
   store.close();
 });
 
+test("conservatively conflicts Greek sigma aliases in linked worktrees", () => {
+  const testRepository = repository();
+  const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
+  store.acquire({ workContractId: "contract-1", owner, paths: ["src/Σ.ts"] });
+
+  const linkedWorktree = createLinkedWorktree(testRepository);
+  repositories.push(linkedWorktree);
+  const linkedStore = openLeaseStore(linkedWorktree.path, { processInspector: inspector("alive") });
+
+  assert.throws(
+    () => linkedStore.acquire({
+      workContractId: "contract-2",
+      owner: otherOwner,
+      paths: ["src/ς.ts"],
+    }),
+    LeaseCollisionError,
+  );
+
+  linkedStore.close();
+  store.close();
+});
+
+test("rejects Greek sigma aliases as duplicate normalized paths", () => {
+  const testRepository = repository();
+  const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });
+
+  assert.throws(
+    () => store.acquire({
+      workContractId: "contract-1",
+      owner,
+      paths: ["src/Σ.ts", "src/ς.ts"],
+    }),
+    LeasePathError,
+  );
+
+  store.close();
+});
+
 test("rejects a live collision with the current owner and Beads issue", () => {
   const testRepository = repository();
   const store = openLeaseStore(testRepository.path, { processInspector: inspector("alive") });

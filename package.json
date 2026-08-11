@@ -29,7 +29,8 @@
     "test:core": "npm run build && node --test dist/test/core/*.test.js"
   },
   "dependencies": {
-    "better-sqlite3": "13.0.3"
+    "better-sqlite3": "13.0.3",
+    "unicode-case-folding": "1.1.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
