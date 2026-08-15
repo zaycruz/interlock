@@ -26,6 +26,7 @@ function repository(): TestRepository { const value = createTestRepository(); re
 
 class FakeBeads implements BeadsClient {
   issue = structuredClone(baseIssue);
+  additionalIssues = new Map<string, typeof baseIssue>();
   calls: string[] = [];
   failClaim = false;
   failHeartbeat = false;
@@ -33,13 +34,14 @@ class FakeBeads implements BeadsClient {
   heartbeatPostReadFailure = false;
   failRecover = false;
   failClose = false;
+  failCloseBeforeMutation = false;
   closeNoop = false;
   closePostReadFailure = false;
   failRead = false;
   applyRecoveryThenFail = false;
   recoverNoop = false;
 
-  getIssue() { this.calls.push("get"); if (this.failRead) throw new Error("Beads read unavailable"); return structuredClone(this.issue); }
+  getIssue(id: string) { this.calls.push("get"); if (this.failRead) throw new Error("Beads read unavailable"); return structuredClone(this.additionalIssues.get(id) ?? this.issue); }
   dependencies() { return []; }
   dependents() { return []; }
   claim(_id: string, actor: string, metadata: InterlockMetadata) {
@@ -55,6 +57,7 @@ class FakeBeads implements BeadsClient {
   }
   close() {
     this.calls.push("close");
+    if (this.failClose && this.failCloseBeforeMutation) throw new Error("connection lost before close request");
     if (!this.closeNoop) this.issue.status = "closed";
     if (this.closePostReadFailure) this.failRead = true;
     if (this.failClose) throw new Error("connection lost after close request");
@@ -236,11 +239,11 @@ test("complete writes durable intent before close and a later exact-closed recon
   const verified = openLeaseStore(repo.path); assert.deepEqual(verified.completionEvents(), []); assert.equal(verified.getWorkContract(metadata(beads).contractId), undefined); verified.close();
 });
 
-test("completion recovery retains an active or mismatched remote contract", () => {
+test("completion recovery retains a mismatched active remote contract", () => {
   const repo = repository(); const beads = new FakeBeads(); const { store } = completingContract(repo.path, beads); store.close();
-  beads.issue.status = "in_progress"; beads.calls = [];
+  beads.issue.status = "in_progress"; beads.issue.metadata.interlock = { ...metadata(beads), actor: "other" }; beads.calls = [];
   const result = runCli(["reconcile", "--repo", repo.path], dependencies(beads));
-  assert.equal(result.exitCode, 1); assert.match(result.stderr, /exact closed completion contract/);
+  assert.equal(result.exitCode, 1); assert.match(result.stderr, /active or closed completion contract/);
   const pending = openLeaseStore(repo.path); assert.equal(pending.completionEvents().length, 1); pending.close();
 });
 
@@ -248,7 +251,7 @@ test("completion recovery retains a closed contract with altered heartbeat metad
   const repo = repository(); const beads = new FakeBeads(); const { store } = completingContract(repo.path, beads); store.close();
   const remote = metadata(beads); beads.issue.metadata.interlock = { ...remote, leaseHealth: { ...remote.leaseHealth, heartbeatAt: remote.leaseHealth.heartbeatAt + 1 } };
   const result = runCli(["reconcile", "--repo", repo.path], dependencies(beads));
-  assert.equal(result.exitCode, 1); assert.match(result.stderr, /exact closed completion contract/);
+  assert.equal(result.exitCode, 1); assert.match(result.stderr, /active or closed completion contract/);
   const pending = openLeaseStore(repo.path); assert.equal(pending.completionEvents().length, 1); pending.close();
 });
 
@@ -265,6 +268,31 @@ test("completion command leaves intent after an ambiguous close result", () => {
   const result = runCli(["complete", "il-1", "--repo", repo.path], dependencies(beads));
   assert.equal(result.exitCode, 1); assert.match(result.stderr, /Completion .* pending/);
   const pending = openLeaseStore(repo.path); assert.equal(pending.completionEvents().length, 1); pending.close();
+});
+
+test("pending completion event blocks subsequent claim and reconcile retries an exact active close", () => {
+  const repo = repository(); const beads = new FakeBeads();
+  beads.additionalIssues.set("il-2", { ...structuredClone(baseIssue), id: "il-2" });
+  assert.equal(claim(repo.path, beads).exitCode, 0);
+  beads.failClose = true;
+  beads.failCloseBeforeMutation = true;
+  const completion = runCli(["complete", "il-1", "--repo", repo.path], dependencies(beads));
+  assert.equal(completion.exitCode, 1);
+  assert.match(completion.stderr, /retry Beads close/);
+
+  const blocked = runCli(["claim", "il-2", "--actor", "agent-b", "--session-pid", String(identity.pid), "--path", "src/other.ts", "--repo", repo.path], dependencies(beads));
+  assert.equal(blocked.exitCode, 1);
+  assert.match(blocked.stderr, /Lifecycle recovery remains pending/);
+  assert.equal(beads.issue.status, "in_progress");
+
+  beads.failClose = false; beads.calls = [];
+  const reconciled = runCli(["reconcile", "--repo", repo.path], dependencies(beads));
+  assert.equal(reconciled.exitCode, 0, reconciled.stderr);
+  assert.equal(beads.calls.includes("close"), true);
+  assert.equal(beads.issue.status, "closed");
+  const store = openLeaseStore(repo.path);
+  assert.deepEqual(store.completionEvents(), []);
+  store.close();
 });
 
 test("complete retains its durable event when Beads close is a no-op or post-close verification cannot read", () => {

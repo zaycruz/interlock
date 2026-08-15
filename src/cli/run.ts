@@ -200,7 +200,7 @@ function complete(command: Extract<Command, { name: "complete" }>, beads: BeadsC
   try {
     beads.close(command.beadId);
   } catch (error) {
-    throw new Error(`Completion for ${command.beadId} is pending. The durable completion intent remains because Beads close may have succeeded: ${message(error)}. Run interlock reconcile after inspection.`);
+    throw new Error(`Completion for ${command.beadId} is pending. The durable completion intent remains because Beads close may have succeeded: ${message(error)}. Run interlock reconcile; it will retry Beads close when the exact active contract remains.`);
   }
   try {
     const remote = beads.getIssue(command.beadId);
@@ -256,8 +256,15 @@ function reconcileLifecycle(store: LeaseStore, beads: BeadsClient): number {
 
 function recoverCompletedContract(beads: BeadsClient, event: CompletionEvent): void {
   const issue = beads.getIssue(event.owner.beadId);
-  if (!isExactClosedContract(issue, event.owner.beadId, event.owner, metadataForEvent(event))) {
-    throw new Error(`observed Beads state is not the exact closed completion contract ${event.workContractId}; manual review is required`);
+  const expected = metadataForEvent(event);
+  if (isExactClosedContract(issue, event.owner.beadId, event.owner, expected)) return;
+  if (!isExactActiveContract(issue, event.owner.beadId, event.owner, expected)) {
+    throw new Error(`observed Beads state is not the exact active or closed completion contract ${event.workContractId}; manual review is required`);
+  }
+  beads.close(event.owner.beadId);
+  const closed = beads.getIssue(event.owner.beadId);
+  if (!isExactClosedContract(closed, event.owner.beadId, event.owner, expected)) {
+    throw new Error(`Beads close retry for completion event ${event.id} did not produce the exact closed contract; the event remains pending`);
   }
 }
 
