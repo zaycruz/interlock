@@ -29,6 +29,12 @@ interlock dashboard --once
 `dashboard` only reads coordination state. It is the human awareness surface;
 task and message mutations remain agent/CLI operations.
 
+The Herdr `space.js` and Pi extension integration uses the exported
+`createSpaceAdapter()` boundary. `space.js` resolves its existing routing to a
+pane, then delegates `send`, `inbox`, `session`, and one-shot `watch` calls to
+Interlock. The adapter shares `$INTERLOCK_STATE_DIR`; it does not maintain a
+second message or digest ledger.
+
 ## Lease safety
 
 Interlock conflicts only on exact declared repository-relative Git paths after

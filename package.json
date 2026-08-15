@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/src/core/index.d.ts",
       "import": "./dist/src/core/index.js"
+    },
+    "./coordination": {
+      "types": "./dist/src/coordination/index.d.ts",
+      "import": "./dist/src/coordination/index.js"
     }
   },
   "bin": {
