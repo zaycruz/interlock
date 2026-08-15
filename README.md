@@ -1,11 +1,41 @@
 # Interlock
 
-Interlock gives a Pi agent a durable work contract and an exclusive exact-path lease while Beads remains the task authority. Interlock V1 supports macOS and Linux only.
+Interlock is a local coordination product for agent sessions. It combines
+exact-path lease safety with agent-native task claims, pane messaging, durable
+inbox digests, and a read-only dashboard.
 
-See `GOAL.md` for the V1 completion contract.
+See `GOAL.md` for the product completion contract.
 
-## V1 conflict rule
+## Agent-native coordination
 
-Interlock conflicts only on exact declared repository-relative Git paths after portable separator normalization, NFC Unicode normalization, and deterministic case folding. This V1 rule applies on every filesystem, so case-distinct paths conflict even on a case-sensitive worktree. The conservative rule prevents clients in worktrees on different filesystems from missing a shared Git-common lease collision.
+Tasks carry a business value so agents can see why work matters, not only what
+files it touches. Claims are exclusive and fail closed when another pane owns
+the task. Messages are correlated by thread and delivered to pane-scoped
+inboxes. Idle and done transitions, plus the watcher heartbeat, create durable
+digest artifacts under `$INTERLOCK_STATE_DIR/deliveries/<pane>/`.
 
-Interlock V1 does not treat symlink or hard-link physical-file aliases as lock aliases. Two agents can declare different Git paths that resolve to the same physical file. This is an ACCEPTABLE-RISK coordination limitation. Agents must declare the same repository-relative Git path when they need a conflict.
+The coordination CLI is available through the `interlock` command:
+
+```text
+interlock task add --id <id> --title <title> --value <business-value>
+interlock task claim <id> --pane <pane>
+interlock send --from-pane <pane> --to-pane <pane> --text <text>
+interlock inbox --pane <pane> --json
+interlock session set --pane <pane> --state <idle|busy|done>
+interlock watch --once
+interlock dashboard --once
+```
+
+`dashboard` only reads coordination state. It is the human awareness surface;
+task and message mutations remain agent/CLI operations.
+
+## Lease safety
+
+Interlock conflicts only on exact declared repository-relative Git paths after
+portable separator normalization, NFC Unicode normalization, and deterministic
+case folding. This conservative rule applies on every filesystem so clients in
+worktrees on different filesystems cannot miss a shared lease collision.
+
+Interlock does not treat symlink or hard-link physical-file aliases as lock
+aliases. Agents must declare the same repository-relative Git path when they
+need a conflict.

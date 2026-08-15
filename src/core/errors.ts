@@ -1,4 +1,4 @@
-import type { LeaseCollision } from "./types.js";
+import type { LeaseCollision, ProcessIdentity, ProcessStatus } from "./types.js";
 
 export class UnsupportedPlatformError extends Error {
   constructor(platform: string) {
@@ -42,5 +42,19 @@ export class WorkContractNotFoundError extends Error {
   constructor(workContractId: string) {
     super(`Work contract ${workContractId} does not exist`);
     this.name = "WorkContractNotFoundError";
+  }
+}
+
+export class LifecycleLockError extends Error {
+  constructor(owner: ProcessIdentity, status: Exclude<ProcessStatus, "dead" | "mismatched">) {
+    super(`Another Interlock lifecycle command holds the database lock (pid ${owner.pid}, started ${owner.startedAt}; inspection: ${status}). Wait for it to exit or inspect the stored process identity.`);
+    this.name = "LifecycleLockError";
+  }
+}
+
+export class LegacyLeaseDatabaseError extends Error {
+  constructor(path: string) {
+    super(`Existing Interlock lease database has a legacy or incomplete schema at ${path}. Finish or clear all old leases deliberately before initializing the new V1 database; Interlock will not migrate it automatically.`);
+    this.name = "LegacyLeaseDatabaseError";
   }
 }

@@ -4,13 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { currentProcessIdentity, inspectProcess } from "../../src/core/index.js";
+import { currentProcessIdentity, inspectProcess, processIdentityFor } from "../../src/core/index.js";
 
 test("uses a strong identity for the current Linux process", { skip: process.platform !== "linux" }, () => {
   const identity = currentProcessIdentity();
 
   assert.match(identity.startedAt, /^linux:\d+$/);
   assert.equal(inspectProcess(identity), "alive");
+});
+
+test("derives a stable identity from a supplied live session PID", () => {
+  assert.deepEqual(processIdentityFor(process.pid), currentProcessIdentity());
+  assert.throws(() => processIdentityFor(0), /live stable identity/);
 });
 
 test("classifies an absent Darwin PID as dead from the signal-zero probe", { skip: process.platform !== "darwin" }, () => {

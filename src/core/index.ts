@@ -1,27 +1,36 @@
 export {
+  LegacyLeaseDatabaseError,
   LeaseCollisionError,
   LeaseOwnershipError,
   LeasePathError,
+  LifecycleLockError,
   UnsupportedPlatformError,
   WorkContractExistsError,
   WorkContractNotFoundError,
 } from "./errors.js";
-export { leaseDatabasePath } from "./git-common-directory.js";
+export { existingLeaseDatabasePath, leaseDatabasePath } from "./git-common-directory.js";
 export { assertSupportedPlatform } from "./platform.js";
-export { currentProcessIdentity, inspectProcess } from "./process-identity.js";
-export { openLeaseStore, SqliteLeaseStore } from "./lease-store.js";
+export { currentProcessIdentity, inspectProcess, processIdentityFor } from "./process-identity.js";
+export { DEFAULT_STALE_AFTER_MS, openLeaseStore, SqliteLeaseStore } from "./lease-store.js";
+export { openLeaseReader, SqliteLeaseReader } from "./lease-reader.js";
+export { normalizeLeasePaths } from "./paths.js";
 export type {
   AcquireLeaseInput,
+  CompletingWorkContract,
+  CompletionEvent,
   HeartbeatState,
   LeaseCollision,
   LeaseOwner,
+  LeaseReader,
   LeaseState,
   LeaseStore,
   LeaseStoreOptions,
   ProcessIdentity,
   ProcessInspector,
   ProcessStatus,
-  ReclaimedWorkContract,
+  RecoveryCause,
+  RecoveryEvent,
+  ReleaseForRecoveryInput,
   RetainedWorkContract,
   StaleSessionReconciliation,
   UninspectedWorkContract,

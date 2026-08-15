@@ -17,6 +17,9 @@ export interface LeaseState {
   paths: string[];
   acquiredAt: number;
   heartbeatAt: number;
+  remoteAttempted: boolean;
+  remoteConfirmed: boolean;
+  completing: boolean;
 }
 
 export interface AcquireLeaseInput {
@@ -30,6 +33,10 @@ export interface WorkContractOwnerInput {
   owner: LeaseOwner;
 }
 
+export interface ReleaseForRecoveryInput extends WorkContractOwnerInput {
+  reason: string;
+}
+
 export interface LeaseCollision {
   path: string;
   workContractId: string;
@@ -38,17 +45,31 @@ export interface LeaseCollision {
 }
 
 export type HeartbeatState = "fresh" | "expired";
+export type RecoveryCause = "explicit-release" | "stale-session-dead" | "stale-session-mismatched";
 
-export interface ReclaimedWorkContract {
+export interface RecoveryEvent {
+  id: number;
   workContractId: string;
+  owner: LeaseOwner;
   paths: string[];
-  processStatus: "dead" | "mismatched";
-  heartbeatState: "expired";
+  heartbeatAt: number;
+  cause: RecoveryCause;
+  reason: string | undefined;
+  createdAt: number;
+}
+
+export interface CompletionEvent {
+  id: number;
+  workContractId: string;
+  owner: LeaseOwner;
+  paths: string[];
+  heartbeatAt: number;
+  createdAt: number;
 }
 
 export interface RetainedWorkContract {
   workContractId: string;
-  processStatus: "alive" | "ambiguous" | "unknown";
+  processStatus: ProcessStatus;
   heartbeatState: "expired";
 }
 
@@ -57,9 +78,16 @@ export interface UninspectedWorkContract {
   heartbeatState: "fresh";
 }
 
+export interface CompletingWorkContract {
+  workContractId: string;
+  state: "completing";
+}
+
 export interface StaleSessionReconciliation {
-  released: ReclaimedWorkContract[];
-  retained: Array<RetainedWorkContract | UninspectedWorkContract>;
+  recoveryEvents: RecoveryEvent[];
+  completionEvents: CompletionEvent[];
+  retained: Array<RetainedWorkContract | UninspectedWorkContract | CompletingWorkContract>;
+  releasedUnconfirmed: string[];
 }
 
 export type ProcessInspector = (process: ProcessIdentity) => ProcessStatus;
@@ -70,12 +98,31 @@ export interface LeaseStoreOptions {
   staleAfterMs?: number;
 }
 
-export interface LeaseStore {
+export interface LeaseReader {
   readonly databasePath: string;
+  listWorkContracts(): LeaseState[];
+  getWorkContractByBeadId(beadId: string): LeaseState | undefined;
+  close(): void;
+}
+
+export interface LeaseStore extends LeaseReader {
+  readonly databasePath: string;
+  acquireLifecycleLock(processor: ProcessIdentity): void;
+  releaseLifecycleLock(processor: ProcessIdentity): void;
   acquire(input: AcquireLeaseInput): LeaseState;
+  markRemoteAttempted(input: WorkContractOwnerInput): LeaseState;
+  confirmRemote(input: WorkContractOwnerInput): LeaseState;
   heartbeat(input: WorkContractOwnerInput): LeaseState;
   release(input: WorkContractOwnerInput): LeaseState;
+  releaseForRecovery(input: ReleaseForRecoveryInput): RecoveryEvent;
+  beginCompletion(input: WorkContractOwnerInput): CompletionEvent;
+  acknowledgeCompletion(eventId: number): void;
+  acknowledgeRecovery(eventId: number): void;
+  recoveryEvents(): RecoveryEvent[];
+  completionEvents(): CompletionEvent[];
   getWorkContract(workContractId: string): LeaseState | undefined;
+  getWorkContractByBeadId(beadId: string): LeaseState | undefined;
   reconcileStaleSessions(): StaleSessionReconciliation;
+  hasPendingLifecycleWork(): boolean;
   close(): void;
 }
