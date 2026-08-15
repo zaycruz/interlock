@@ -10,6 +10,7 @@ export interface SpaceSendInput {
   fromPane: string;
   toPane: string;
   text: string;
+  token: string;
   workspace?: string;
   reply?: number;
 }
@@ -21,6 +22,7 @@ export interface SpaceSendResult {
 
 export interface SpaceInboxInput {
   pane: string;
+  token: string;
   all?: boolean;
 }
 
@@ -33,6 +35,7 @@ export interface SpaceInboxResult {
 
 export interface SpaceSessionInput {
   pane: string;
+  token: string;
   state: CoordinationSession["state"];
 }
 
@@ -63,6 +66,7 @@ export function createSpaceAdapter(): SpaceAdapter {
       "send",
       "--from-pane", input.fromPane,
       "--to-pane", input.toPane,
+      "--token", input.token,
       "--text", input.text,
       ...(input.workspace === undefined ? [] : ["--workspace", input.workspace]),
       ...(input.reply === undefined ? [] : ["--reply", String(input.reply)]),
@@ -70,12 +74,14 @@ export function createSpaceAdapter(): SpaceAdapter {
     inbox: (input) => invoke<SpaceInboxResult>("inbox", [
       "inbox",
       "--pane", input.pane,
+      "--token", input.token,
       "--json",
       ...(input.all ? ["--all"] : []),
     ]),
     session: (input) => invoke<SpaceSessionResult>("session", [
       "session", "set",
       "--pane", input.pane,
+      "--token", input.token,
       "--state", input.state,
     ]),
     watch: () => invoke<SpaceWatchResult>("watch", ["watch", "--once"]),

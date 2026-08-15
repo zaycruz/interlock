@@ -48,6 +48,7 @@ export interface CoordinationState {
   version: 1;
   nextMessageId: number;
   nextDigestId: number;
+  paneTokens: Record<string, string>;
   tasks: CoordinationTask[];
   messages: CoordinationMessage[];
   sessions: CoordinationSession[];

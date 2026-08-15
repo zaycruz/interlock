@@ -31,23 +31,27 @@ function nativeJson(argv: string[]): any {
 test("space.js operations delegate to one Interlock coordination state", () => {
   isolatedState();
   const adapter = createSpaceAdapter();
+  const p1Token = "adapter-token-p1";
+  const p4Token = "adapter-token-p4";
+  nativeJson(["session", "register", "--pane", "wT:p1", "--token", p1Token]);
+  nativeJson(["session", "register", "--pane", "wT:p4", "--token", p4Token]);
 
-  adapter.session({ pane: "wT:p4", state: "busy" });
-  const sent = adapter.send({ fromPane: "wT:p1", toPane: "wT:p4", text: "branch is ready", workspace: "wT" });
+  adapter.session({ pane: "wT:p4", token: p4Token, state: "busy" });
+  const sent = adapter.send({ fromPane: "wT:p1", toPane: "wT:p4", token: p1Token, text: "branch is ready", workspace: "wT" });
   assert.equal(sent.message.toPane, "wT:p4");
-  assert.equal(nativeJson(["inbox", "--pane", "wT:p4", "--json"]).messages[0].text, "branch is ready");
+  assert.equal(nativeJson(["inbox", "--pane", "wT:p4", "--token", p4Token, "--json"]).messages[0].text, "branch is ready");
 
-  const idle = adapter.session({ pane: "wT:p4", state: "idle" });
+  const idle = adapter.session({ pane: "wT:p4", token: p4Token, state: "idle" });
   assert.equal(idle.digests.length, 1);
   assert.equal(adapter.watch().digested, 0);
 
-  const inbox = adapter.inbox({ pane: "wT:p4" });
+  const inbox = adapter.inbox({ pane: "wT:p4", token: p4Token });
   assert.equal(inbox.messages[0].id, sent.message.id);
   assert.equal(inbox.digests[0].messageIds[0], sent.message.id);
   assert.equal(readFileSync(coordinationStatePath(), "utf8").includes("branch is ready"), true);
 
-  const reply = adapter.send({ fromPane: "wT:p4", toPane: "wT:p1", reply: sent.message.id, text: "ack" });
+  const reply = adapter.send({ fromPane: "wT:p4", toPane: "wT:p1", token: p4Token, reply: sent.message.id, text: "ack" });
   assert.equal(reply.message.replyTo, sent.message.id);
   assert.equal(reply.message.toPane, "wT:p1");
-  assert.equal(nativeJson(["inbox", "--pane", "wT:p1", "--json"]).messages[0].text, "ack");
+  assert.equal(nativeJson(["inbox", "--pane", "wT:p1", "--token", p1Token, "--json"]).messages[0].text, "ack");
 });
