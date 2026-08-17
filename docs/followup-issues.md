@@ -73,3 +73,14 @@ tracked here for a future issue/runbook pass.
     risk. A crash between temporary write and rename can leave .tmp.<pid>
     litter, and there is no fsync before rename. Refs:
     src/coordination/state.ts:29-36.
+
+14. First-registration squatting — not fixed, accepted risk. Any local
+    process can register an unclaimed pane name first and own that identity.
+    The planned mitigation is Herdr-boundary token provisioning per the
+    commit directive. Source: qa-w380-review.md re-review 2026-08-15.
+
+15. Reap guard admits a stale-but-busy claimer — not fixed, accepted risk.
+    lastSeenAt only advances on session set, so a live agent quiet for more
+    than 15 minutes is reap-able by any registered operator pane. Tighten
+    the guard to done-only or add a session heartbeat. Source:
+    qa-w380-review.md re-review 2026-08-15.
