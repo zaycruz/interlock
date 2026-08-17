@@ -14,12 +14,19 @@ Do not start this runbook until all conditions are true:
 - Your local branch tip matches the reviewed tip:
 
   ```bash
-  git rev-parse w380-unification   # must print 3be3174...
   git rev-parse main               # must print 019f142...
+  git rev-parse w380-unification
   ```
 
-If either SHA differs, stop. Escalate to head office. The QA verdict does
-not cover a different tip.
+  The branch tip must be `3be3174`, or a descendant whose changes since
+  `3be3174` touch `docs/` only. Verify with:
+
+  ```bash
+  git diff --name-only 3be3174..w380-unification   # every path must start with docs/
+  ```
+
+If `main` differs, or code paths changed since the reviewed tip, stop.
+Escalate to head office. The QA verdict covers only the code at `3be3174`.
 
 ## Merge
 
