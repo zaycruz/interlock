@@ -15,12 +15,16 @@ type ProcessStart = AvailableProcessStart | { status: "dead" } | { status: "unkn
 const PS_LSTART = /^(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s{1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
 
 export function currentProcessIdentity(): ProcessIdentity {
-  const start = processStart(process.pid);
+  return processIdentityFor(process.pid);
+}
+
+export function processIdentityFor(pid: number): ProcessIdentity {
+  const start = processStart(pid);
   if (start.status !== "available") {
-    throw new Error(`Could not determine start time for process ${process.pid}`);
+    throw new Error(`Could not determine a live stable identity for process ${pid}`);
   }
 
-  return { pid: process.pid, startedAt: start.startedAt };
+  return { pid, startedAt: start.startedAt };
 }
 
 export const inspectProcess: ProcessInspector = (identity): ProcessStatus => {

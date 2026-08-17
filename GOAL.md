@@ -22,17 +22,23 @@ Interlock holds the claim until the agent completes it or the agent session is v
 - Verify staged changed paths before completion.
 - Provide a Pi extension that binds a Pi session and calls the CLI lifecycle.
 
-## V1 non-goals
+## Lease-core V1 non-goals
 
-- No Herdr delivery or cross-session routing.
+- No hosted delivery or multi-machine lease store.
 - No hosted service or multi-machine lease store.
 - No file globs. Use exact paths only.
 - No replacement issue tracker.
 - No hard operating-system isolation.
 
-## V2 boundary
+## Unified coordination boundary
 
-V2 uses Herdr to send Beads-backed notices to direct dependencies, dependents, exact-path conflicts, and explicitly named agents.
+The unified interlock product adds a file-backed local coordination plane for
+cross-pane messages, business-valued task claims, durable idle/done digests,
+and a read-only dashboard. Pane mutations are authenticated by per-pane
+tokens, dead claims have an explicit done/stale reap path, and completion
+reconciliation retries only exact active Beads contracts. Plane remains the
+broader work-item authority to integrate after its live claim/lease semantics
+are verified.
 
 ## Verification
 

@@ -1,5 +1,5 @@
 {
-  "name": "interlock-lease-core",
+  "name": "interlock",
   "version": "0.1.0",
   "private": true,
   "engines": {
@@ -16,16 +16,23 @@
     ".": {
       "types": "./dist/src/core/index.d.ts",
       "import": "./dist/src/core/index.js"
+    },
+    "./coordination": {
+      "types": "./dist/src/coordination/index.d.ts",
+      "import": "./dist/src/coordination/index.js"
     }
   },
+  "bin": {
+    "interlock": "./dist/src/cli/main.js"
+  },
   "files": [
-    "dist/src/core"
+    "dist/src"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/core/*.test.js",
+    "test": "npm run build && node --test dist/test/core/*.test.js dist/test/contracts/*.test.js dist/test/cli/*.test.js dist/test/beads/*.test.js dist/test/coordination/*.test.js",
     "test:core": "npm run build && node --test dist/test/core/*.test.js"
   },
   "dependencies": {
