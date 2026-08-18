@@ -1,11 +1,15 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { CoordinationMessage, CoordinationState, CoordinationTask, CoordinationSession, DigestDelivery } from "./types.js";
-import { validatePaneName, validatePaneToken } from "./validation.js";
+import type { AwarenessEvent, AwarenessEventKind, CoordinationMessage, CoordinationState, CoordinationTask, CoordinationSession, DigestDelivery, LeaderChannel, OrchestratorState, Pod, PodMember } from "./types.js";
+import { validateCoordinationName, validateMemberName, validateMemberToken, validatePaneName } from "./validation.js";
 import { assertSupportedPlatform } from "../core/platform.js";
+
+export const ORCHESTRATOR_MEMBER = "orchestrator";
+
+const AWARENESS_EVENT_KINDS: readonly AwarenessEventKind[] = ["pod-created", "pod-closed", "channel-opened", "channel-closed", "leader-death-verified", "leader-promoted", "leader-done"];
 
 const LOCK_WAIT_MS = 60_000;
 const LOCK_POLL_MS = 10;
@@ -25,7 +29,11 @@ export function coordinationLockPath(): string { return join(coordinationStateDi
 export function coordinationDeliveryDir(): string { return join(coordinationStateDir(), "deliveries"); }
 
 export function emptyCoordinationState(): CoordinationState {
-  return { version: 1, nextMessageId: 1, nextDigestId: 1, paneTokens: {}, tasks: [], messages: [], sessions: [], digests: [], lastWatchAt: null };
+  return {
+    version: 2, nextMessageId: 1, nextDigestId: 1, nextChannelId: 1, nextAwarenessEventId: 1,
+    memberTokens: {}, pods: [], podMembers: [], leaderChannels: [], awarenessEvents: [], orchestrator: null,
+    tasks: [], messages: [], sessions: [], digests: [], lastWatchAt: null,
+  };
 }
 
 export function readCoordinationState(): CoordinationState {
@@ -39,6 +47,10 @@ export function readCoordinationState(): CoordinationState {
 }
 
 export function writeCoordinationState(state: CoordinationState): void {
+  writeStateFile(state);
+}
+
+function writeStateFile(state: unknown): void {
   mkdirSync(coordinationStateDir(), { recursive: true });
   removeStaleTemporaryFiles();
   const temporaryPath = `${coordinationStatePath()}.tmp.${process.pid}`;
@@ -81,6 +93,110 @@ export function withCoordinationLock<T>(operation: (state: CoordinationState) =>
   }
 }
 
+// Raw read/write inside the coordination lock for operator-level provisioning
+// and the one-time version-1 migration, which must run before normalizeState
+// can accept the file (ADR 0003 D8).
+function withRawCoordinationLock<T>(operation: (raw: Record<string, unknown> | undefined) => { state: unknown; result: T }): T {
+  mkdirSync(coordinationStateDir(), { recursive: true });
+  const lock = coordinationLockPath();
+  const owner: CoordinationLockOwner = { token: randomUUID(), pid: process.pid, acquiredAt: Date.now() };
+  acquireCoordinationLock(lock, owner);
+  try {
+    const { state, result } = operation(readRawCoordinationState());
+    writeStateFile(state);
+    return result;
+  } finally {
+    releaseCoordinationLock(lock, owner.token);
+  }
+}
+
+function readRawCoordinationState(): Record<string, unknown> | undefined {
+  try {
+    const value: unknown = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+    if (!isRecord(value)) throw new Error("state is not an object");
+    return value;
+  } catch (error) {
+    if (isMissingFile(error)) return undefined;
+    throw new Error(`cannot read Interlock coordination state: ${message(error)}`);
+  }
+}
+
+// ADR 0003 D3: exactly one orchestrator per deployment, provisioned only here.
+// The token is minted engine-side, stored as a sha256 hash, and returned once
+// for the operator. A second init refuses because the stored hash differs from
+// any fresh mint; --rotate replaces a lost token.
+export function provisionOrchestrator(options: { rotate: boolean }): { token: string; rotated: boolean } {
+  return withRawCoordinationLock((raw) => {
+    if (raw !== undefined && raw.version !== 1 && raw.version !== 2) throw new Error(unsupportedVersionMessage(raw));
+    const token = randomBytes(32).toString("hex");
+    const hash = tokenHash(token);
+    const doubleInit = "orchestrator is already initialized; a second init cannot reproduce the printed-once token, use `interlock orchestrator init --rotate` to replace a lost token";
+    if (raw === undefined || raw.version === 2) {
+      const state = raw === undefined ? emptyCoordinationState() : normalizeState(raw);
+      if (state.memberTokens[ORCHESTRATOR_MEMBER] !== undefined && !options.rotate) throw new Error(doubleInit);
+      state.memberTokens[ORCHESTRATOR_MEMBER] = hash;
+      state.orchestrator = { initializedAt: new Date().toISOString() };
+      return { state, result: { token, rotated: options.rotate } };
+    }
+    // Version-1 file: the ADR D8 order is init first, migrate second, so the
+    // provisioning is recorded in the legacy file and state migrate carries
+    // it into version 2.
+    const legacyTokens = memberTokens(raw.paneTokens);
+    if (legacyTokens[ORCHESTRATOR_MEMBER] !== undefined && !options.rotate) throw new Error(doubleInit);
+    const state = { ...raw, paneTokens: { ...legacyTokens, [ORCHESTRATOR_MEMBER]: hash }, orchestrator: { initializedAt: new Date().toISOString() } };
+    return { state, result: { token, rotated: options.rotate } };
+  });
+}
+
+// ADR 0003 D8: the one-time version-1 upgrade. Wraps every version-1 pane in a
+// single orchestrator-created pod, renames paneTokens to memberTokens, and
+// carries messages, tasks, sessions, and digests over unchanged as history.
+export function migrateLegacyCoordinationState(legacyPod: string, legacyLeader: string): { pod: Pod; members: PodMember[] } {
+  const podName = validateCoordinationName(legacyPod, "pod name");
+  const leader = validateCoordinationName(legacyLeader, "legacy leader");
+  // The reserved orchestrator name is never a valid pod leader: init inserts
+  // the orchestrator hash into the same token map migrate reads, so the
+  // "registered version-1 pane" check below would pass for it and produce a
+  // leaderless pod (every real member demoted to worker).
+  if (leader === ORCHESTRATOR_MEMBER) {
+    throw new Error("legacy leader orchestrator is reserved for the orchestrator; a pod leader must be a version-1 pane member");
+  }
+  return withRawCoordinationLock((raw) => {
+    if (raw === undefined) throw new Error("no coordination state exists to migrate");
+    if (raw.version === 2) throw new Error("coordination state is already version 2; nothing to migrate");
+    if (raw.version !== 1) throw new Error(unsupportedVersionMessage(raw));
+    const tokens = memberTokens(raw.paneTokens);
+    if (tokens[ORCHESTRATOR_MEMBER] === undefined) {
+      throw new Error("orchestrator is not initialized; migration creates a pod and pod creation requires the orchestrator, run `interlock orchestrator init` first");
+    }
+    if (tokens[leader] === undefined) throw new Error("legacy leader " + leader + " is not a registered version-1 pane");
+    const tasks = arrayOf<CoordinationTask>(raw.tasks);
+    const messages = arrayOf<CoordinationMessage>(raw.messages);
+    const sessions = arrayOf<CoordinationSession>(raw.sessions);
+    const digests = arrayOf<DigestDelivery>(raw.digests);
+    const now = new Date().toISOString();
+    const names = Object.keys(tokens).filter((name) => name !== ORCHESTRATOR_MEMBER).sort();
+    const pod: Pod = { name: podName, createdAt: now, leader, succession: [leader, ...names.filter((name) => name !== leader)], status: "open", closedAt: null };
+    const members: PodMember[] = names.map((member) => ({ member, pod: podName, role: member === leader ? "leader" as const : "worker" as const, process: null, registeredAt: now }));
+    // Schema invariant: the leader is a pod member and exactly one member holds the leader role.
+    const leaders = members.filter((member) => member.role === "leader");
+    if (leaders.length !== 1 || leaders[0]!.member !== leader) throw new Error("internal: migration must produce a pod with exactly one leader-role member");
+    const state = emptyCoordinationState();
+    state.memberTokens = tokens;
+    state.pods = [pod];
+    state.podMembers = members;
+    state.tasks = tasks;
+    state.messages = messages;
+    state.sessions = sessions;
+    state.digests = digests;
+    state.lastWatchAt = typeof raw.lastWatchAt === "string" ? raw.lastWatchAt : null;
+    state.nextMessageId = idCounter(raw.nextMessageId, highestId(messages, "message"));
+    state.nextDigestId = idCounter(raw.nextDigestId, highestId(digests, "digest"));
+    state.orchestrator = { initializedAt: isRecord(raw.orchestrator) && typeof raw.orchestrator.initializedAt === "string" ? raw.orchestrator.initializedAt : now };
+    return { state, result: { pod, members } };
+  });
+}
+
 export function writeDigestDelivery(state: CoordinationState, digest: Omit<DigestDelivery, "file">, messages: CoordinationMessage[]): DigestDelivery {
   validatePaneName(digest.pane);
   const paneDir = join(coordinationDeliveryDir(), digest.pane);
@@ -94,8 +210,14 @@ export function writeDigestDelivery(state: CoordinationState, digest: Omit<Diges
 
 function normalizeState(value: unknown): CoordinationState {
   if (!isRecord(value)) throw new Error("state is not an object");
+  if (value.version !== 2) throw new Error(unsupportedVersionMessage(value));
   const state = emptyCoordinationState();
-  state.paneTokens = paneTokens(value.paneTokens);
+  state.memberTokens = memberTokens(value.memberTokens);
+  state.pods = pods(value.pods);
+  state.podMembers = podMembers(value.podMembers);
+  state.leaderChannels = leaderChannels(value.leaderChannels);
+  state.awarenessEvents = awarenessEvents(value.awarenessEvents);
+  state.orchestrator = orchestratorState(value.orchestrator);
   state.tasks = arrayOf<CoordinationTask>(value.tasks);
   state.messages = arrayOf<CoordinationMessage>(value.messages);
   state.sessions = arrayOf<CoordinationSession>(value.sessions);
@@ -103,23 +225,33 @@ function normalizeState(value: unknown): CoordinationState {
   state.lastWatchAt = typeof value.lastWatchAt === "string" ? value.lastWatchAt : null;
   state.nextMessageId = idCounter(value.nextMessageId, highestId(state.messages, "message"));
   state.nextDigestId = idCounter(value.nextDigestId, highestId(state.digests, "digest"));
+  state.nextChannelId = idCounter(value.nextChannelId, highestId(state.leaderChannels, "channel"));
+  state.nextAwarenessEventId = idCounter(value.nextAwarenessEventId, highestId(state.awarenessEvents, "awareness event"));
   return state;
 }
 
-export function registerPaneToken(state: CoordinationState, pane: string, token: string): void {
-  validatePaneName(pane);
-  const hash = tokenHash(validatePaneToken(token));
-  const existing = state.paneTokens[pane];
-  if (existing !== undefined && !safeEqual(existing, hash)) throw new Error("pane " + pane + " is already registered with a different token");
-  state.paneTokens[pane] = hash;
+function unsupportedVersionMessage(value: Record<string, unknown>): string {
+  const found = value.version === undefined ? "missing" : String(value.version);
+  return `coordination state version is ${found}, not 2; version-1 state requires the explicit operator upgrade: run \`interlock orchestrator init\`, then \`interlock state migrate --legacy-pod <name> --legacy-leader <pane>\``;
 }
 
-export function assertPaneToken(state: CoordinationState, pane: string, token: string): void {
-  validatePaneName(pane);
-  const expected = state.paneTokens[pane];
-  if (expected === undefined) throw new Error("pane " + pane + " is not registered; run session register before mutating it");
-  const actual = tokenHash(validatePaneToken(token));
-  if (!safeEqual(expected, actual)) throw new Error("pane token does not authenticate " + pane);
+export function registerMemberToken(state: CoordinationState, member: string, token: string): void {
+  validateMemberName(member);
+  if (member === ORCHESTRATOR_MEMBER) {
+    throw new Error("member name orchestrator is reserved for the orchestrator; provision it with `interlock orchestrator init`");
+  }
+  const hash = tokenHash(validateMemberToken(token));
+  const existing = state.memberTokens[member];
+  if (existing !== undefined && !safeEqual(existing, hash)) throw new Error("member " + member + " is already registered with a different token");
+  state.memberTokens[member] = hash;
+}
+
+export function assertMemberToken(state: CoordinationState, member: string, token: string): void {
+  validateMemberName(member);
+  const expected = state.memberTokens[member];
+  if (expected === undefined) throw new Error("member " + member + " is not registered; run session register before mutating it");
+  const actual = tokenHash(validateMemberToken(token));
+  if (!safeEqual(expected, actual)) throw new Error("member token does not authenticate " + member);
 }
 
 function acquireCoordinationLock(lock: string, owner: CoordinationLockOwner): void {
@@ -187,16 +319,89 @@ function lockWaitMs(): number {
   return Number.isFinite(configured) && configured > 0 ? configured : LOCK_WAIT_MS;
 }
 
-function paneTokens(value: unknown): Record<string, string> {
+function memberTokens(value: unknown): Record<string, string> {
   if (value === undefined) return {};
-  if (!isRecord(value)) throw new Error("coordination pane tokens are not an object");
+  if (!isRecord(value)) throw new Error("coordination member tokens are not an object");
   const result: Record<string, string> = {};
-  for (const [pane, hash] of Object.entries(value)) {
-    validatePaneName(pane);
-    if (typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) throw new Error("coordination pane token hash for " + pane + " is invalid");
-    result[pane] = hash;
+  for (const [member, hash] of Object.entries(value)) {
+    validateMemberName(member);
+    if (typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) throw new Error("coordination member token hash for " + member + " is invalid");
+    result[member] = hash;
   }
   return result;
+}
+
+function pods(value: unknown): Pod[] {
+  const list = arrayOf<Pod>(value);
+  const seen = new Set<string>();
+  for (const pod of list) {
+    if (!isRecord(pod)) throw new Error("coordination pod record is corrupt");
+    validateCoordinationName(pod.name, "pod name");
+    validateCoordinationName(pod.leader, "pod leader");
+    if (seen.has(pod.name)) throw new Error("coordination pod " + pod.name + " is duplicated");
+    seen.add(pod.name);
+    if (pod.status !== "open" && pod.status !== "closed") throw new Error("coordination pod " + pod.name + " status is corrupt");
+    if (typeof pod.createdAt !== "string") throw new Error("coordination pod " + pod.name + " creation timestamp is corrupt");
+    if (pod.closedAt !== null && typeof pod.closedAt !== "string") throw new Error("coordination pod " + pod.name + " close timestamp is corrupt");
+    if (!Array.isArray(pod.succession)) throw new Error("coordination pod " + pod.name + " succession is corrupt");
+    for (const member of pod.succession) validateCoordinationName(member, "pod succession member");
+  }
+  return list;
+}
+
+function podMembers(value: unknown): PodMember[] {
+  const list = arrayOf<PodMember>(value);
+  const seen = new Set<string>();
+  for (const member of list) {
+    if (!isRecord(member)) throw new Error("coordination pod member record is corrupt");
+    validateMemberName(member.member);
+    validateCoordinationName(member.pod, "member pod");
+    if (seen.has(member.member)) throw new Error("coordination member " + member.member + " is duplicated");
+    seen.add(member.member);
+    if (member.role !== "leader" && member.role !== "worker") throw new Error("coordination member " + member.member + " role is corrupt");
+    if (typeof member.registeredAt !== "string") throw new Error("coordination member " + member.member + " registration timestamp is corrupt");
+    if (member.process !== null && (!isRecord(member.process) || !Number.isSafeInteger(member.process.pid) || (member.process.pid as number) <= 0 || typeof member.process.startedAt !== "string")) {
+      throw new Error("coordination member " + member.member + " process identity is corrupt");
+    }
+  }
+  return list;
+}
+
+function leaderChannels(value: unknown): LeaderChannel[] {
+  const list = arrayOf<LeaderChannel>(value);
+  for (const channel of list) {
+    if (!isRecord(channel)) throw new Error("coordination channel record is corrupt");
+    validateCoordinationName(channel.fromPod, "channel from-pod");
+    validateCoordinationName(channel.toPod, "channel to-pod");
+    if (typeof channel.topic !== "string" || channel.topic.trim() === "") throw new Error("coordination channel topic is corrupt");
+    if (typeof channel.openedAt !== "string") throw new Error("coordination channel open timestamp is corrupt");
+    if (channel.closedAt !== null && typeof channel.closedAt !== "string") throw new Error("coordination channel close timestamp is corrupt");
+    if (!Number.isSafeInteger(channel.messageCount) || channel.messageCount < 0) throw new Error("coordination channel message count is corrupt");
+  }
+  return list;
+}
+
+function awarenessEvents(value: unknown): AwarenessEvent[] {
+  const list = arrayOf<AwarenessEvent>(value);
+  for (const event of list) {
+    if (!isRecord(event)) throw new Error("coordination awareness event record is corrupt");
+    if (!AWARENESS_EVENT_KINDS.includes(event.kind)) throw new Error("coordination awareness event kind is corrupt");
+    if (typeof event.createdAt !== "string") throw new Error("coordination awareness event timestamp is corrupt");
+    if (event.pod !== undefined) validateCoordinationName(event.pod, "awareness event pod");
+    if (event.fromPod !== undefined) validateCoordinationName(event.fromPod, "awareness event from-pod");
+    if (event.toPod !== undefined) validateCoordinationName(event.toPod, "awareness event to-pod");
+    if (event.member !== undefined) validateCoordinationName(event.member, "awareness event member");
+    if (event.members !== undefined && (!Array.isArray(event.members) || event.members.some((member) => typeof member !== "string"))) throw new Error("coordination awareness event members are corrupt");
+    if (event.topic !== undefined && typeof event.topic !== "string") throw new Error("coordination awareness event topic is corrupt");
+    if (event.messageCount !== undefined && (!Number.isSafeInteger(event.messageCount) || event.messageCount < 0)) throw new Error("coordination awareness event message count is corrupt");
+  }
+  return list;
+}
+
+function orchestratorState(value: unknown): OrchestratorState | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || typeof value.initializedAt !== "string") throw new Error("coordination orchestrator state is corrupt");
+  return { initializedAt: value.initializedAt };
 }
 
 function tokenHash(token: string): string { return createHash("sha256").update(token).digest("hex"); }

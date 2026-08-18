@@ -48,6 +48,7 @@ test("a lock owned by a dead process is reclaimed without leaving a lock behind"
 test("a corrupted nextMessageId recovers above the highest existing message id", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify({
+    version: 2,
     nextMessageId: 1,
     messages: [{ id: 7 }, { id: 3 }],
   }));
@@ -59,6 +60,7 @@ test("a corrupted nextMessageId recovers above the highest existing message id",
 test("a nextMessageId equal to the highest existing message id recovers above it", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify({
+    version: 2,
     nextMessageId: 7,
     messages: [{ id: 7 }],
   }));
@@ -69,6 +71,7 @@ test("a nextMessageId equal to the highest existing message id recovers above it
 test("a corrupted nextDigestId recovers above the highest existing digest id", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify({
+    version: 2,
     nextDigestId: "corrupt",
     digests: [{ id: 4 }, { id: 2 }],
   }));
@@ -79,6 +82,7 @@ test("a corrupted nextDigestId recovers above the highest existing digest id", (
 test("a healthy counter above the highest existing id is preserved", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify({
+    version: 2,
     nextMessageId: 12,
     nextDigestId: 9,
     messages: [{ id: 7 }],
@@ -94,6 +98,7 @@ test("a healthy counter above the highest existing id is preserved", () => {
 test("corrupt existing message ids refuse loudly instead of guessing a counter", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify({
+    version: 2,
     nextMessageId: 1,
     messages: [{ id: "oops" }],
   }));
@@ -104,6 +109,7 @@ test("corrupt existing message ids refuse loudly instead of guessing a counter",
 test("corrupt existing digest ids refuse loudly instead of guessing a counter", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify({
+    version: 2,
     nextDigestId: 1,
     digests: [{ id: -3 }],
   }));

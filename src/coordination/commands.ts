@@ -1,13 +1,13 @@
 import { unlinkSync } from "node:fs";
 
 import { buildDashboardView, renderDashboard } from "./render.js";
-import { assertPaneToken, readCoordinationState, registerPaneToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
+import { assertMemberToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
 import { validatePaneName, validateTaskId } from "./validation.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
-const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard", "compact"]);
+const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard", "compact", "orchestrator", "state"]);
 const TASK_STAGES: TaskStage[] = ["open", "claimed", "in-progress", "blocked", "done", "closed"];
 
 export function runCoordinationCli(argv: string[]): CoordinationCliResult | null {
@@ -34,6 +34,8 @@ export function coordinationUsage(): string[] {
     "  interlock watch --once",
     "  interlock dashboard --once [--json]",
     "  interlock compact",
+    "  interlock orchestrator init [--rotate]  (operator: mint the orchestrator token, printed once; --rotate replaces a lost token)",
+    "  interlock state migrate --legacy-pod <name> --legacy-leader <pane>  (operator: one-time version-1 upgrade; run orchestrator init first)",
   ];
 }
 
@@ -46,7 +48,23 @@ function execute(argv: string[]): string {
   if (command === "watch") return watchCommand(argv.slice(1));
   if (command === "dashboard") return dashboardCommand(argv.slice(1));
   if (command === "compact") return compactCommand();
+  if (command === "orchestrator") return orchestratorCommand(argv.slice(1));
+  if (command === "state") return stateCommand(argv.slice(1));
   throw new Error(`unknown coordination command: ${command}`);
+}
+
+function orchestratorCommand(argv: string[]): string {
+  if (argv[0] !== "init") throw new Error("orchestrator requires init");
+  const parsed = parseArgs(argv.slice(1));
+  const provisioned = provisionOrchestrator({ rotate: has(parsed, "rotate") });
+  return JSON.stringify({ ok: true, orchestrator: ORCHESTRATOR_MEMBER, token: provisioned.token, rotated: provisioned.rotated });
+}
+
+function stateCommand(argv: string[]): string {
+  if (argv[0] !== "migrate") throw new Error("state requires migrate");
+  const parsed = parseArgs(argv.slice(1));
+  const migrated = migrateLegacyCoordinationState(required(parsed, "legacy-pod"), required(parsed, "legacy-leader"));
+  return JSON.stringify({ ok: true, pod: migrated.pod, members: migrated.members });
 }
 
 function taskCommand(argv: string[]): string {
@@ -57,7 +75,7 @@ function taskCommand(argv: string[]): string {
     const pane = validatePaneName(required(parsed, "pane"));
     const token = requiredToken(parsed);
     const task = withCoordinationLock((state) => {
-      assertPaneToken(state, pane, token);
+      assertMemberToken(state, pane, token);
       if (state.tasks.some((candidate) => candidate.id === id)) throw new Error(`task ${id} already exists`);
       const now = new Date().toISOString();
       const ownerPane = optional(parsed, "owner-pane");
@@ -80,7 +98,7 @@ function taskCommand(argv: string[]): string {
   if (subcommand === "reap" || subcommand === "release") {
     const deadClaimer = validatePaneName(required(parsed, "dead-claimer"), "dead claimer");
     const task = withCoordinationLock((state) => {
-      assertPaneToken(state, pane, token);
+      assertMemberToken(state, pane, token);
       if (deadClaimer === pane) throw new Error("operator pane cannot reap itself");
       const candidate = findTask(state, id);
       if (candidate.claimer !== deadClaimer) throw new Error("task " + id + " is not claimed by " + deadClaimer);
@@ -101,7 +119,7 @@ function taskCommand(argv: string[]): string {
   }
   if (subcommand === "claim") {
     return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
-      assertPaneToken(state, pane, token);
+      assertMemberToken(state, pane, token);
       const task = findTask(state, id);
       if (task.stage !== "open" || task.claimer !== null) {
         throw new Error(`claim_conflict: task ${id} is ${task.stage}, claimed by ${task.claimer ?? "unknown"} (revision ${task.revision})`);
@@ -112,7 +130,7 @@ function taskCommand(argv: string[]): string {
   }
   if (subcommand === "progress") {
     return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
-      assertPaneToken(state, pane, token);
+      assertMemberToken(state, pane, token);
       const task = ownedTask(state, id, pane); if (task.stage === "claimed") task.stage = "in-progress"; task.revision += 1; task.lastProgressAt = new Date().toISOString(); return { ...task };
     }) });
   }
@@ -120,7 +138,7 @@ function taskCommand(argv: string[]): string {
     const stage = argv[2] as TaskStage | undefined;
     if (!stage || !TASK_STAGES.includes(stage)) throw new Error(`task stage must be one of ${TASK_STAGES.join("|")}`);
     const result = withCoordinationLock((state) => {
-      assertPaneToken(state, pane, token);
+      assertMemberToken(state, pane, token);
       const task = ownedTask(state, id, pane); task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
       const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
       return { task: { ...task }, digests };
@@ -134,7 +152,7 @@ function sendCommand(argv: string[]): string {
   const parsed = parseArgs(argv);
   const result = withCoordinationLock((state) => {
     const fromPane = validatePaneName(required(parsed, "from-pane"), "sender pane");
-    assertPaneToken(state, fromPane, requiredToken(parsed));
+    assertMemberToken(state, fromPane, requiredToken(parsed));
     const replyTo = optionalNumber(parsed, "reply");
     const parent = replyTo === undefined ? undefined : state.messages.find((message) => message.id === replyTo);
     if (replyTo !== undefined && parent === undefined) throw new Error(`unknown message #${replyTo}`);
@@ -155,7 +173,7 @@ function inboxCommand(argv: string[]): string {
   const parsed = parseArgs(argv);
   const state = readCoordinationState();
   const pane = validatePaneName(required(parsed, "pane"));
-  assertPaneToken(state, pane, requiredToken(parsed));
+  assertMemberToken(state, pane, requiredToken(parsed));
   const messages = state.messages.filter((message) => message.toPane === pane && (has(parsed, "all") || message.state === "queued" || message.state === "claimed"));
   const digests = state.digests.filter((digest) => digest.pane === pane);
   if (has(parsed, "json")) return JSON.stringify({ ok: true, pane, messages, digests });
@@ -169,7 +187,7 @@ function sessionCommand(argv: string[]): string {
     const pane = validatePaneName(required(parsed, "pane"));
     const token = requiredToken(parsed);
     const registered = withCoordinationLock((state) => {
-      registerPaneToken(state, pane, token);
+      registerMemberToken(state, pane, token);
       return pane;
     });
     return JSON.stringify({ ok: true, pane: registered, registered: true });
@@ -181,7 +199,7 @@ function sessionCommand(argv: string[]): string {
   const sessionState = required(parsed, "state") as SessionState;
   if (!["idle", "busy", "done"].includes(sessionState)) throw new Error("session state must be idle|busy|done");
   const result = withCoordinationLock((state) => {
-    assertPaneToken(state, pane, token);
+    assertMemberToken(state, pane, token);
     const now = new Date().toISOString();
     const existing = state.sessions.find((session) => session.pane === pane);
     if (existing) { existing.state = sessionState; existing.lastSeenAt = now; } else state.sessions.push({ pane, state: sessionState, lastSeenAt: now });
