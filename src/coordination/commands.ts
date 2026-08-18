@@ -1,3 +1,5 @@
+import { unlinkSync } from "node:fs";
+
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertPaneToken, readCoordinationState, registerPaneToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
@@ -5,7 +7,7 @@ import { validatePaneName, validateTaskId } from "./validation.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
-const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard"]);
+const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard", "compact"]);
 const TASK_STAGES: TaskStage[] = ["open", "claimed", "in-progress", "blocked", "done", "closed"];
 
 export function runCoordinationCli(argv: string[]): CoordinationCliResult | null {
@@ -31,6 +33,7 @@ export function coordinationUsage(): string[] {
     "  interlock session set --pane <pane> --token <token> --state <idle|busy|done>",
     "  interlock watch --once",
     "  interlock dashboard --once [--json]",
+    "  interlock compact",
   ];
 }
 
@@ -42,6 +45,7 @@ function execute(argv: string[]): string {
   if (command === "session") return sessionCommand(argv.slice(1));
   if (command === "watch") return watchCommand(argv.slice(1));
   if (command === "dashboard") return dashboardCommand(argv.slice(1));
+  if (command === "compact") return compactCommand();
   throw new Error(`unknown coordination command: ${command}`);
 }
 
@@ -201,6 +205,31 @@ function dashboardCommand(argv: string[]): string {
   return has(parsed, "json") ? JSON.stringify(view) : renderDashboard(view);
 }
 
+function compactCommand(): string {
+  return JSON.stringify({ ok: true, ...withCoordinationLock((state) => compactTerminalRecords(state)) });
+}
+
+// Drops terminal messages (handled/closed) and digests that no longer cover a
+// retained message. nextMessageId and nextDigestId are never lowered, so the
+// persisted counters remain the id high-water mark even when every record of a
+// kind is removed.
+function compactTerminalRecords(state: CoordinationState): { removedMessages: number; removedDigests: number; keptMessages: number; keptDigests: number } {
+  const keptMessages = state.messages.filter((message) => message.state !== "handled" && message.state !== "closed");
+  const keptIds = new Set(keptMessages.map((message) => message.id));
+  const keptDigests = state.digests.filter((digest) => digest.messageIds.some((id) => keptIds.has(id)));
+  const removedDigestFiles = state.digests.filter((digest) => !digest.messageIds.some((id) => keptIds.has(id))).map((digest) => digest.file);
+  const removedMessages = state.messages.length - keptMessages.length;
+  const removedDigests = state.digests.length - keptDigests.length;
+  state.messages = keptMessages;
+  state.digests = keptDigests;
+  for (const file of removedDigestFiles) removeDigestFile(file);
+  return { removedMessages, removedDigests, keptMessages: keptMessages.length, keptDigests: keptDigests.length };
+}
+
+function removeDigestFile(file: string): void {
+  try { unlinkSync(file); } catch (error) { if (!isNodeError(error) || error.code !== "ENOENT") throw error; }
+}
+
 function deliverDigests(state: CoordinationState, reason: DigestDelivery["reason"]): DigestDelivery[] {
   const delivered = new Set(state.digests.flatMap((digest) => digest.messageIds));
   const byPane = new Map<string, CoordinationMessage[]>();
@@ -226,4 +255,5 @@ function optional(values: Map<string, string | true>, name: string): string | nu
 function requiredToken(values: Map<string, string | true>): string { const value = optional(values, "token") ?? process.env.INTERLOCK_PANE_TOKEN; if (value === undefined || value.trim() === "") throw new Error("--token is required (or set INTERLOCK_PANE_TOKEN)"); return value; }
 function optionalNumber(values: Map<string, string | true>, name: string): number | undefined { const value = optional(values, name); if (value === null) return undefined; const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`--${name} must be a positive integer`); return parsed; }
 function has(values: Map<string, string | true>, name: string): boolean { return values.has(name); }
+function isNodeError(error: unknown): error is NodeJS.ErrnoException { return error instanceof Error && "code" in error; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
