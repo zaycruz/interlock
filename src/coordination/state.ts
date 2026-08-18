@@ -154,6 +154,13 @@ export function provisionOrchestrator(options: { rotate: boolean }): { token: st
 export function migrateLegacyCoordinationState(legacyPod: string, legacyLeader: string): { pod: Pod; members: PodMember[] } {
   const podName = validateCoordinationName(legacyPod, "pod name");
   const leader = validateCoordinationName(legacyLeader, "legacy leader");
+  // The reserved orchestrator name is never a valid pod leader: init inserts
+  // the orchestrator hash into the same token map migrate reads, so the
+  // "registered version-1 pane" check below would pass for it and produce a
+  // leaderless pod (every real member demoted to worker).
+  if (leader === ORCHESTRATOR_MEMBER) {
+    throw new Error("legacy leader orchestrator is reserved for the orchestrator; a pod leader must be a version-1 pane member");
+  }
   return withRawCoordinationLock((raw) => {
     if (raw === undefined) throw new Error("no coordination state exists to migrate");
     if (raw.version === 2) throw new Error("coordination state is already version 2; nothing to migrate");
@@ -171,6 +178,9 @@ export function migrateLegacyCoordinationState(legacyPod: string, legacyLeader: 
     const names = Object.keys(tokens).filter((name) => name !== ORCHESTRATOR_MEMBER).sort();
     const pod: Pod = { name: podName, createdAt: now, leader, succession: [leader, ...names.filter((name) => name !== leader)], status: "open", closedAt: null };
     const members: PodMember[] = names.map((member) => ({ member, pod: podName, role: member === leader ? "leader" as const : "worker" as const, process: null, registeredAt: now }));
+    // Schema invariant: the leader is a pod member and exactly one member holds the leader role.
+    const leaders = members.filter((member) => member.role === "leader");
+    if (leaders.length !== 1 || leaders[0]!.member !== leader) throw new Error("internal: migration must produce a pod with exactly one leader-role member");
     const state = emptyCoordinationState();
     state.memberTokens = tokens;
     state.pods = [pod];

@@ -264,6 +264,21 @@ test("state migrate refuses on missing or version-2 state and on an unknown lega
   assert.match(unknownLeader.stderr, /not a registered version-1 pane/);
 });
 
+test("state migrate refuses the reserved orchestrator name as legacy leader", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify(legacyState()));
+  json(runCli(["orchestrator", "init"]));
+
+  // init records the orchestrator hash in the v1 token map, so the
+  // "registered version-1 pane" guard alone would accept it (QA il-1af MF-1).
+  const result = runCli(["state", "migrate", "--legacy-pod", "legacy", "--legacy-leader", "orchestrator"]);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /reserved for the orchestrator/);
+
+  // A refused migrate leaves the version-1 state untouched, nothing to repair.
+  assert.throws(() => readCoordinationState(), /state migrate/);
+});
+
 test("state migrate wraps version-1 panes into one pod and preserves history", () => {
   isolatedState();
   writeFileSync(coordinationStatePath(), JSON.stringify(legacyState()));
