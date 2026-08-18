@@ -64,7 +64,7 @@ export function runCli(argv: string[], dependencies: CliDependencies = {}): CliR
     if (command.name === "status") {
       const output = command.all
         ? board(command, beads, readerFactory, dependencies.clock)
-        : command.json ? snapshot(command, beads, readerFactory, dependencies.clock) : status(command, beads, storeFactory);
+        : command.json ? snapshot(command, beads, readerFactory, dependencies.clock) : status(command, beads, readerFactory, dependencies.clock);
       return { exitCode: 0, stdout: `${output}\n`, stderr: "" };
     }
     const processor = (dependencies.lifecycleProcessor ?? currentProcessIdentity)();
@@ -138,13 +138,14 @@ function claim(command: Extract<Command, { name: "claim" }>, beads: BeadsClient,
   return `Claimed ${validatedIssue.issue.id} with ${lease.paths.length} exact path lease(s).`;
 }
 
-function status(command: Extract<Command, { name: "status"; all: false }>, beads: BeadsClient, storeFactory: (repositoryPath: string) => LeaseStore): string {
+function status(command: Extract<Command, { name: "status"; all: false }>, beads: BeadsClient,
+  readerFactory: (repositoryPath: string) => LeaseReader, clock: (() => number) | undefined): string {
   const issue = beads.getIssue(command.beadId);
   const metadata = issue.metadata === undefined ? undefined : interlockMetadata(issue.metadata);
   const databasePath = existingLeaseDatabasePath(command.repositoryPath);
-  const store = existsSync(databasePath) ? storeFactory(command.repositoryPath) : undefined;
+  const reader = existsSync(databasePath) ? readerFactory(command.repositoryPath) : undefined;
   try {
-    const lease = store?.getWorkContractByBeadId(command.beadId);
+    const lease = reader?.getWorkContractByBeadId(command.beadId);
     const drift = statusDrift(issue, metadata, lease, command.beadId);
     try {
       const validatedIssue = validateIssue(issue);
@@ -154,14 +155,14 @@ function status(command: Extract<Command, { name: "status"; all: false }>, beads
         upstream: beads.dependencies(command.beadId),
         downstream: beads.dependents(command.beadId),
         leaseHealth: drift === undefined && lease !== undefined
-          ? { status: Date.now() - lease.heartbeatAt > DEFAULT_STALE_AFTER_MS ? "expired" : "fresh", heartbeatAt: lease.heartbeatAt }
+          ? { status: (clock ?? Date.now)() - lease.heartbeatAt > DEFAULT_STALE_AFTER_MS ? "expired" : "fresh", heartbeatAt: lease.heartbeatAt }
           : undefined,
         drift,
       });
     } catch (error) {
       return renderStatusDiagnostic(issue, error, lease?.paths ?? metadata?.paths ?? [], drift);
     }
-  } finally { store?.close(); }
+  } finally { reader?.close(); }
 }
 
 function snapshot(
