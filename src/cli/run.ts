@@ -19,7 +19,7 @@ import {
   normalizeLeasePaths,
   openLeaseReader,
   openLeaseStore,
-  processIdentityFor,
+  sessionProcessIdentityFor,
   type CompletionEvent,
   type LeaseOwner,
   type LeaseReader,
@@ -61,7 +61,7 @@ export function runCli(argv: string[], dependencies: CliDependencies = {}): CliR
     const beads = dependencies.beads ?? new ChildProcessBeadsClient(command.repositoryPath);
     const storeFactory = dependencies.openLeaseStore ?? openLeaseStore;
     const readerFactory = dependencies.openLeaseReader ?? openLeaseReader;
-    const identityFor = dependencies.processIdentityFor ?? processIdentityFor;
+    const identityFor = dependencies.processIdentityFor ?? sessionProcessIdentityFor;
     if (command.name === "status") {
       const output = command.all
         ? board(command, beads, readerFactory, dependencies.clock)
