@@ -7,6 +7,10 @@
   owns the HOW.
 - Review driver: `/Users/master/projects/qa-w380-review.md` (forgery by
   convention, stale-vs-done reap guard, dead-holder wedge).
+- Product rulings (head office #562, 2026-08-17): pods ship in v0.0.1 (the
+  Product Contract owns release scope); the awareness feed reuses the digest
+  machinery's plumbing, never its content payloads. Both match this ADR as
+  drafted.
 
 ## Context
 

@@ -67,26 +67,31 @@ consent into herdr's configuration — herdr's files belong to herdr.
 
 ### Install location and mechanism
 
+Product ruling (head office, 2026-08-17, #562): install is automated on
+explicit yes, with the exact command echoed before it runs.
+
 The herdr plugin is a separate package, `@raava/interlock-plugin-herdr`,
-versioned in lockstep with the engine (ADR-0002 covers the boundary). Setup
-does not run `npm install` itself. Instead:
+versioned in lockstep with the engine (ADR-0002 covers the boundary). On
+consent, setup runs two steps, echoing each exact command before it runs:
 
-1. Setup checks whether the plugin package is already resolvable. If not, it
-   prints the exact command (`npm install -g @raava/interlock-plugin-herdr`)
-   and stops after consent — the user runs the package-manager step, so the
-   user sees the supply-chain event in their own terminal.
+1. Package install: `npm install -g @raava/interlock-plugin-herdr`. Setup
+   runs this itself after the explicit yes; echoing the command first keeps
+   the supply-chain event visible in the user's own terminal. If the plugin
+   package is already resolvable at the expected version, setup skips this
+   step and says so.
 2. Activation — the only write setup performs into herdr — goes through
-   herdr's own plugin CLI (e.g. `herdr plugin add <path>`). Setup never
-   hand-edits herdr config files. If herdr exposes no plugin registration
-   command, setup aborts with instructions instead of guessing the format.
-3. Setup verifies the activation by calling the read path (`herdr plugin
-   list` or equivalent) and confirms the plugin appears. Unverified installs
-   are reported as failed.
+   herdr's own plugin CLI: `herdr plugin link <path>` (verified surface;
+   the manifest is `herdr-plugin.toml`, reference implementation
+   `~/projects/herdr-space-manager`). Setup never hand-edits herdr config
+   files. If the link command fails, setup aborts with instructions instead
+   of guessing the format.
+3. Setup verifies the activation with `herdr plugin list` and confirms the
+   plugin appears. Unverified installs are reported as failed.
 
-Uninstall is `interlock setup --remove`. It calls herdr's own removal
-command, then removes interlock's consent record and plugin-side registration
-state. It does not remove the npm package; it prints the matching
-`npm uninstall -g` command.
+Uninstall is `interlock setup --remove`. It calls `herdr plugin unlink
+<path>`, then removes interlock's consent record and plugin-side
+registration state. It does not remove the npm package; it prints the
+matching `npm uninstall -g` command.
 
 ### Failure and partial states
 
@@ -142,9 +147,10 @@ impersonated installers, not about crossing OS user boundaries.
 
 - **What a malicious setup could do.** Anything the user can do. The binding
   constraint is therefore *surface*, not privilege: setup's write surface is
-  exactly three things — one herdr CLI invocation for activation, one for
-  verification, and interlock's own consent record. It holds no credentials,
-  opens no sockets, and runs no package manager. An attacker who swaps the
+  exactly four things — one echoed `npm install -g` for the plugin package,
+  one `herdr plugin link` invocation, one `herdr plugin list` verification,
+  and interlock's own consent record. It holds no credentials and opens no
+  sockets. An attacker who swaps the
   `interlock` binary wins regardless; these bounds exist so that a *buggy*
   setup cannot silently corrupt herdr, and so review can enumerate every
   write.
@@ -154,7 +160,8 @@ impersonated installers, not about crossing OS user boundaries.
   same-user attacker can already edit herdr directly. The consent record
   gives doctor an audit trail of what was done and when.
 - **PATH hijack of the `herdr` probe.** A malicious `herdr` earlier on PATH
-  would receive one invocation (`--version`) and possibly a plugin-add call.
+  would receive one invocation (`--version`) and possibly a `plugin link`
+  call.
   Setup mitigates by printing the resolved binary path in the plan, so the
   user sees *which* herdr will be touched before consenting.
 - **No downgrade via repair.** The repair path only moves the plugin to the
@@ -166,9 +173,9 @@ impersonated installers, not about crossing OS user boundaries.
 
 ## Open questions
 
-- The exact herdr plugin CLI surface (`herdr plugin add/list/remove`) is
-  assumed, not yet verified against the herdr plugin API docs. If herdr has
-  no such surface, the fallback defined above (abort with instructions)
-  applies and this ADR needs a revision.
+- ~~The exact herdr plugin CLI surface~~ Resolved (head office ruling,
+  2026-08-17, #562): `herdr plugin link <path>` / `unlink` / `list`, with a
+  `herdr-plugin.toml` manifest. Verified on the development machine against
+  the reference plugin `~/projects/herdr-space-manager`.
 - Whether the plugin package is installed globally or per-user is delegated
   to the user's npm setup; setup only checks resolvability.
