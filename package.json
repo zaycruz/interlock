@@ -1,7 +1,8 @@
 {
-  "name": "interlock",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@raava/interlock",
+  "version": "0.0.1",
+  "description": "Local coordination for agent sessions: exact-path leases, task claims, pane messaging, and inbox digests.",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },

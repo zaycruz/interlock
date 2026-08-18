@@ -52,3 +52,45 @@ worktrees on different filesystems cannot miss a shared lease collision.
 Interlock does not treat symlink or hard-link physical-file aliases as lock
 aliases. Agents must declare the same repository-relative Git path when they
 need a conflict.
+
+## Security and threat model
+
+Read this section before you deploy Interlock. Interlock is a **local,
+same-user** coordination tool. It assumes every process that can reach its
+state directory already runs as you, on your machine. It does not provide
+security boundaries between OS users, machines, or networks, and it does not
+defend against an attacker who can read or write your state directory
+directly — that attacker already owns everything Interlock protects.
+
+Within that model, Interlock authenticates every mutating CLI command with
+per-pane tokens (only SHA-256 hashes are stored, compared timing-safe) and
+validates all identifiers against a strict character set. What it protects
+against is confused or misbehaving *agents* acting through the CLI, not
+adversaries with filesystem access.
+
+Known limitations, disclosed plainly:
+
+- **Plaintext state at rest.** Messages, task values, and coordination state
+  are stored unencrypted in `$INTERLOCK_STATE_DIR` (including
+  `state.json` and digest delivery files). Never paste secrets, credentials,
+  or sensitive personal data into Interlock messages or task values.
+- **First-registration identity trust.** A pane identity is bound to
+  whichever local process registers that pane name first. A local process can
+  squat an unclaimed pane name. Provision pane names you care about early,
+  and treat unexpected registration conflicts as a signal to investigate.
+- **`--session-pid` is trusted.** The lease lifecycle accepts any live
+  process ID as a session identity. A caller can bind leases to a process it
+  does not own, which delays stale-session reclamation. This matches the
+  cooperative same-user model; do not rely on PID binding as proof of
+  identity.
+- **Beads metadata is visible to repo collaborators.** Interlock records
+  actor, PID, process start time, and leased repository-relative paths in
+  Beads issue metadata. Keep secrets out of paths and identifiers.
+- **Tokens are bearer secrets in your environment.** Pane tokens are
+  delivered through your local provisioning channel (for example, your
+  terminal or agent configuration). Anyone who reads a token can act as that
+  pane through the CLI. Store tokens in a secret manager, never in files or
+  messages.
+
+If you need multi-user, multi-machine, or networked coordination with real
+adversaries, Interlock's current threat model does not cover your use case.
