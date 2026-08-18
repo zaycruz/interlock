@@ -1,10 +1,10 @@
 export { runCoordinationCli, coordinationUsage } from "./commands.js";
-export { assertSendAllowed, closePod, createPod, evaluatePreSend, parsePodTemplate } from "./pods.js";
+export { assertSendAllowed, CHANNEL_TOPIC_MAX_LENGTH, closeLeaderChannel, closePod, createPod, evaluatePreSend, openLeaderChannel, parsePodTemplate, validateChannelTopic } from "./pods.js";
 export { buildDashboardView, renderDashboard } from "./render.js";
 export { assertMemberToken, assertOrchestratorToken, coordinationLockPath, coordinationStateDir, coordinationStatePath, emptyCoordinationState, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeCoordinationState } from "./state.js";
 export { createSpaceAdapter } from "./space-adapter.js";
 export { validateCoordinationName, validateMemberName, validateMemberToken, validatePaneName, validateTaskId } from "./validation.js";
 export type { CoordinationCliResult } from "./commands.js";
-export type { ClosedPod, CreatedPod, PodTemplate } from "./pods.js";
+export type { ClosedChannel, ClosedPod, CreatedPod, OpenedChannel, PodTemplate } from "./pods.js";
 export type { SpaceAdapter, SpaceInboxInput, SpaceInboxResult, SpaceSendInput, SpaceSendResult, SpaceSessionInput, SpaceSessionResult, SpaceWatchResult } from "./space-adapter.js";
 export type { AwarenessEvent, AwarenessEventKind, CoordinationMessage, CoordinationSession, CoordinationState, CoordinationTask, DashboardView, DigestDelivery, LeaderChannel, MessageStage, OrchestratorState, Pod, PodMember, SessionState, TaskStage } from "./types.js";
