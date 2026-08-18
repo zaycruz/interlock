@@ -78,16 +78,25 @@ function removeStaleTemporaryFiles(): void {
   }
 }
 
-export function withCoordinationLock<T>(operation: (state: CoordinationState) => T): T {
+export function withCoordinationLock<T>(operation: (state: CoordinationState) => T, options?: { commitOnThrow?: boolean }): T {
   mkdirSync(coordinationStateDir(), { recursive: true });
   const lock = coordinationLockPath();
   const owner: CoordinationLockOwner = { token: randomUUID(), pid: process.pid, acquiredAt: Date.now() };
   acquireCoordinationLock(lock, owner);
   try {
     const state = readCoordinationState();
-    const result = operation(state);
-    writeCoordinationState(state);
-    return result;
+    try {
+      const result = operation(state);
+      writeCoordinationState(state);
+      return result;
+    } catch (error) {
+      // ADR 0003 D6 (MF-D): a send rejected by the routing boundary can still
+      // carry a verified leader death and promotion, which must be committed —
+      // death is a fact the engine observed, not a side effect of a successful
+      // send. Only the send path opts in; every other rejection stays atomic.
+      if (options?.commitOnThrow) writeCoordinationState(state);
+      throw error;
+    }
   } finally {
     releaseCoordinationLock(lock, owner.token);
   }

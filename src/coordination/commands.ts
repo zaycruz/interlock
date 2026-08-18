@@ -1,10 +1,11 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
-import { closeLeaderChannel, closePod, createPod, evaluatePreSend, openLeaderChannel, parsePodTemplate } from "./pods.js";
+import { closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
-import { validatePaneName, validateTaskId } from "./validation.js";
+import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
+import { currentProcessIdentity, inspectProcess } from "../core/process-identity.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -39,6 +40,9 @@ export function coordinationUsage(): string[] {
     "  interlock state migrate --legacy-pod <name> --legacy-leader <pane>  (operator: one-time version-1 upgrade; run orchestrator init first)",
     "  interlock pod create --name <pod> --template <file> --orchestrator-token <token>  (member tokens are printed once)",
     "  interlock pod close --pod <pod> --orchestrator-token <token>",
+    "  interlock pod bind --member <member> --token <token> --identity-pid <pid> --identity-started-at <start>  (host-adapter registration bind; the engine re-verifies the identity live)",
+    "  interlock pod unbind --member <member> --token <token>",
+    "  interlock pod rebind --member <member> --token <token>  (verified-dead identity only; binds the calling process, no --pid)",
     "  interlock pod list [--json]",
     "  interlock pod show --pod <pod> [--json]",
     "  interlock pod channel open --pod <pod> --to-pod <pod> --member <leader> --token <token> --topic <topic>  (topic required, max 140 chars)",
@@ -87,6 +91,52 @@ function podCommand(argv: string[]): string {
     });
     return JSON.stringify({ ok: true, ...closed });
   }
+  if (subcommand === "bind") {
+    const member = validateMemberName(required(parsed, "member"));
+    const token = requiredToken(parsed);
+    const pid = Number(required(parsed, "identity-pid"));
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("--identity-pid must be a positive integer");
+    const startedAt = required(parsed, "identity-started-at");
+    const bound = withCoordinationLock((state) => {
+      assertMemberToken(state, member, token);
+      const identity = { pid, startedAt };
+      // The engine never trusts a caller-asserted identity: the bind is
+      // rejected unless the named process is alive right now. `ambiguous`
+      // (weak ps precision on the lstart second) still confirms a live process
+      // with a matching start time; only dead, mismatched, and unknown refuse.
+      const status = inspectProcess(identity);
+      if (status !== "alive" && status !== "ambiguous") {
+        throw new Error("process identity " + pid + " / " + startedAt + " is not alive; a member binds only a live process");
+      }
+      return rebindMemberProcess(state, member, identity);
+    });
+    return JSON.stringify({ ok: true, member: bound });
+  }
+  if (subcommand === "unbind") {
+    const member = validateMemberName(required(parsed, "member"));
+    const token = requiredToken(parsed);
+    const unbound = withCoordinationLock((state) => {
+      assertMemberToken(state, member, token);
+      const entry = state.podMembers.find((candidate) => candidate.member === member);
+      if (entry === undefined) throw new Error("member " + member + " is not in a pod");
+      entry.process = null;
+      return entry;
+    });
+    return JSON.stringify({ ok: true, member: unbound });
+  }
+  if (subcommand === "rebind") {
+    const member = validateMemberName(required(parsed, "member"));
+    const token = requiredToken(parsed);
+    // ADR 0003 D6 (MF-A): no --pid flag. The rebind binds the calling
+    // process's own identity, captured engine-side; a token holder cannot pin
+    // the member's identity to a foreign or immortal process.
+    const identity = currentProcessIdentity();
+    const rebound = withCoordinationLock((state) => {
+      assertMemberToken(state, member, token);
+      return rebindMemberProcess(state, member, identity);
+    });
+    return JSON.stringify({ ok: true, member: rebound });
+  }
   // Read-only views, same posture as the dashboard: no token, no mutation.
   if (subcommand === "list") {
     const state = readCoordinationState();
@@ -104,7 +154,7 @@ function podCommand(argv: string[]): string {
     for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
     return lines.join("\n");
   }
-  throw new Error("pod requires create, close, list, or show");
+  throw new Error("pod requires create, close, bind, unbind, rebind, list, or show");
 }
 
 function channelCommand(argv: string[]): string {
@@ -307,7 +357,9 @@ function sendCommand(argv: string[]): string {
     }
     const digests = deliverDigests(state, "watcher-heartbeat");
     return { message, digests };
-  });
+    // commitOnThrow: a rejected send can still carry a verified leader death
+    // and promotion, which must be committed (see withCoordinationLock).
+  }, { commitOnThrow: true });
   return JSON.stringify({ ok: true, ...result });
 }
 
@@ -345,6 +397,9 @@ function sessionCommand(argv: string[]): string {
     const now = new Date().toISOString();
     const existing = state.sessions.find((session) => session.pane === pane);
     if (existing) { existing.state = sessionState; existing.lastSeenAt = now; } else state.sessions.push({ pane, state: sessionState, lastSeenAt: now });
+    // ADR 0003 D6 (R14, MF-C): a leader reporting done fires leader-done and
+    // sheds external reach (its open channels close) without promoting anyone.
+    if (sessionState === "done") recordLeaderDone(state, pane);
     const digests = sessionState === "idle" || sessionState === "done" ? deliverDigests(state, sessionState === "done" ? "agent-done" : "agent-idle") : [];
     return { session: state.sessions.find((session) => session.pane === pane), digests };
   });
@@ -354,7 +409,14 @@ function sessionCommand(argv: string[]): string {
 function watchCommand(argv: string[]): string {
   const parsed = parseArgs(argv);
   if (!has(parsed, "once")) throw new Error("watch requires --once; use a timer or service to invoke the heartbeat");
-  const result = withCoordinationLock((state) => { state.lastWatchAt = new Date().toISOString(); const digests = deliverDigests(state, "watcher-heartbeat"); return { heartbeatAt: state.lastWatchAt, digests }; });
+  const result = withCoordinationLock((state) => {
+    state.lastWatchAt = new Date().toISOString();
+    // ADR 0003 D6: the watch sweep is an evaluation point for leader death,
+    // alongside the lazy pre-send evaluation in evaluatePreSend.
+    for (const pod of state.pods) evaluateSuccession(state, pod.leader);
+    const digests = deliverDigests(state, "watcher-heartbeat");
+    return { heartbeatAt: state.lastWatchAt, digests };
+  });
   return JSON.stringify({ ok: true, digested: result.digests.length, messageIds: result.digests.flatMap((digest) => digest.messageIds), ...result });
 }
 

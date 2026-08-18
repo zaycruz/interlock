@@ -3,6 +3,8 @@ import { randomBytes } from "node:crypto";
 import type { AwarenessEvent, AwarenessEventKind, CoordinationState, LeaderChannel, Pod, PodMember } from "./types.js";
 import { ORCHESTRATOR_MEMBER, tokenHash } from "./state.js";
 import { validateCoordinationName } from "./validation.js";
+import { inspectProcess } from "../core/process-identity.js";
+import type { ProcessIdentity } from "../core/types.js";
 
 // ADR 0003 D2: the JSON pod template defines the roster, the leader, and the
 // ranked succession order, all fixed at creation.
@@ -138,13 +140,95 @@ export function closePod(state: CoordinationState, name: string): ClosedPod {
   return { pod, closedChannels };
 }
 
-// ADR 0003 D6 (MF-D): the single pre-send evaluation seam. Slice 4 slots lazy
-// leader-death evaluation in here BEFORE the routing decision: evaluate death,
-// apply the promotion, then evaluate the triggering send against post-promotion
-// state. Keep evaluatePreSend the only pre-send call site so that ordering
-// cannot be bypassed.
+// ADR 0003 D6 (MF-D): the single pre-send evaluation seam. Lazy leader-death
+// evaluation runs here BEFORE the routing decision: evaluate death, apply the
+// promotion, then evaluate the triggering send against post-promotion state.
+// Keep evaluatePreSend the only pre-send call site so that ordering cannot be
+// bypassed.
 export function evaluatePreSend(state: CoordinationState, fromMember: string, toMember: string, channelId?: number): void {
+  evaluateSuccession(state, fromMember);
+  evaluateSuccession(state, toMember);
   assertSendAllowed(state, fromMember, toMember, channelId);
+}
+
+// ADR 0003 D6 (R13, R16): death-verified auto-promotion. If the named member's
+// pod has a bound, verifiably dead leader, promote the first ranked successor
+// whose own process verifies alive. Only `dead` and `mismatched` count as
+// death — `alive`, `ambiguous`, and `unknown` never fire promotion (AE1), and
+// staleness/silence/missed heartbeats are not inputs at all.
+export function evaluateSuccession(state: CoordinationState, member: string): void {
+  const entry = membershipOf(state, member);
+  if (entry === undefined) return;
+  const { pod } = entry;
+  if (pod.status !== "open") return;
+  const leader = state.podMembers.find((candidate) => candidate.member === pod.leader && candidate.pod === pod.name);
+  if (leader === undefined || leader.process === null) return;
+  const status = inspectProcess(leader.process);
+  if (status !== "dead" && status !== "mismatched") return;
+
+  appendAwarenessEvent(state, "leader-death-verified", { pod: pod.name, member: leader.member });
+  // The dead leader's token must not survive as a posthumous forgery path
+  // (MF-B); the hash is deleted in the same locked mutation as the promotion.
+  delete state.memberTokens[leader.member];
+
+  for (const candidate of pod.succession) {
+    if (candidate === leader.member) continue;
+    const successor = state.podMembers.find((entry) => entry.member === candidate && entry.pod === pod.name);
+    if (successor === undefined || successor.process === null) continue;
+    // `ambiguous` (weak ps precision) still confirms a live process with a
+    // matching start time; only `dead`, `mismatched`, and `unknown` disqualify
+    // a successor. Promotion fires only on the leader's verified death, never
+    // on a candidate's ambiguity.
+    const candidateStatus = inspectProcess(successor.process);
+    if (candidateStatus !== "alive" && candidateStatus !== "ambiguous") continue;
+    leader.role = "worker";
+    successor.role = "leader";
+    pod.leader = successor.member;
+    appendAwarenessEvent(state, "leader-promoted", { pod: pod.name, member: successor.member });
+    return;
+  }
+  // Every candidate is dead or unverifiable: the pod keeps its roster, loses
+  // external reach (the dead leader stays in place, unverifiable), and waits
+  // for the orchestrator. It never closes (R15).
+}
+
+// ADR 0003 D6 (MF-A): rebind lifecycle. A member whose recorded identity has
+// verifiably died rebinds to the calling process's own identity, captured
+// engine-side. There is no --pid flag and no way to name another process: a
+// stolen token can rebind only to a process the thief actually runs, and only
+// after the real member's process is verifiably gone.
+export function rebindMemberProcess(state: CoordinationState, member: string, identity: ProcessIdentity): PodMember {
+  const entry = membershipOf(state, member);
+  if (entry === undefined) throw new Error("member " + member + " is not in a pod");
+  if (entry.pod.status === "closed") throw new Error("pod " + entry.pod.name + " is closed");
+  const record = entry.member;
+  if (record.process !== null) {
+    const status = inspectProcess(record.process);
+    if (status !== "dead" && status !== "mismatched") {
+      throw new Error("member " + member + " is still alive under its recorded process identity; rebind requires a verified-dead identity");
+    }
+  }
+  record.process = identity;
+  return record;
+}
+
+// ADR 0003 D6 (R14, MF-C): leader-done power reduction. The done leader keeps
+// role "leader" for addressing and keeps its token, but its open channels are
+// closed in the same mutation, each with its message count recorded, and the
+// leader-done awareness event fires. No promotion runs; the pod waits for the
+// orchestrator to appoint a successor or close it (AE3).
+export function recordLeaderDone(state: CoordinationState, member: string): void {
+  const entry = membershipOf(state, member);
+  if (entry === undefined) return;
+  if (entry.member.role !== "leader" || entry.pod.status !== "open") return;
+  appendAwarenessEvent(state, "leader-done", { pod: entry.pod.name, member });
+  const now = new Date().toISOString();
+  for (const channel of state.leaderChannels) {
+    if (channel.closedAt !== null) continue;
+    if (channel.fromPod !== entry.pod.name && channel.toPod !== entry.pod.name) continue;
+    channel.closedAt = now;
+    appendAwarenessEvent(state, "channel-closed", { fromPod: channel.fromPod, toPod: channel.toPod, topic: channel.topic, messageCount: channel.messageCount });
+  }
 }
 
 // ADR 0003 D4: the routing boundary, decided by one pure function over state.
