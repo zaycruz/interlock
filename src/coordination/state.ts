@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -39,9 +39,23 @@ export function readCoordinationState(): CoordinationState {
 
 export function writeCoordinationState(state: CoordinationState): void {
   mkdirSync(coordinationStateDir(), { recursive: true });
+  removeStaleTemporaryFiles();
   const temporaryPath = `${coordinationStatePath()}.tmp.${process.pid}`;
-  writeFileSync(temporaryPath, JSON.stringify(state, null, 2));
+  const descriptor = openSync(temporaryPath, "w", 0o600);
+  try {
+    writeSync(descriptor, JSON.stringify(state, null, 2));
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
   renameSync(temporaryPath, coordinationStatePath());
+}
+
+function removeStaleTemporaryFiles(): void {
+  for (const entry of readdirSync(coordinationStateDir())) {
+    if (!entry.startsWith("state.json.tmp.")) continue;
+    try { unlinkSync(join(coordinationStateDir(), entry)); } catch (error) { if (!isMissing(error)) throw error; }
+  }
 }
 
 export function withCoordinationLock<T>(operation: (state: CoordinationState) => T): T {
