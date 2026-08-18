@@ -49,6 +49,7 @@ type Command =
   | { name: "heartbeat"; beadId: string; repositoryPath: string }
   | { name: "complete"; beadId: string; repositoryPath: string }
   | { name: "release"; beadId: string; reason: string; repositoryPath: string }
+  | { name: "resolve"; beadId: string; repositoryPath: string }
   | { name: "reconcile"; repositoryPath: string };
 
 export function runCli(argv: string[], dependencies: CliDependencies = {}): CliResult {
@@ -99,6 +100,7 @@ function executeMutating(command: Exclude<Command, { name: "status" }>, beads: B
     case "heartbeat": return heartbeat(command, beads, store);
     case "complete": return complete(command, beads, store);
     case "release": return release(command, beads, store);
+    case "resolve": return resolveClaim(command, beads, store);
     case "reconcile": return reconcile(beads, store);
   }
 }
@@ -107,7 +109,7 @@ function claim(command: Extract<Command, { name: "claim" }>, beads: BeadsClient,
   identityFor: (pid: number) => ProcessIdentity): string {
   const observedIssue = beads.getIssue(command.beadId);
   const validatedIssue = validateIssue(observedIssue);
-  if (observedIssue.metadataMalformed || observedIssue.metadata === undefined || observedIssue.status !== "open" || observedIssue.assignee !== undefined || Object.hasOwn(observedIssue.metadata, "interlock")) {
+  if (!isUnclaimedIssue(observedIssue)) {
     throw new Error(`Beads issue ${command.beadId} is not an unassigned open issue without Interlock metadata; local and Beads state were not changed`);
   }
   reconcileLifecycle(store, beads);
@@ -221,6 +223,34 @@ function release(command: Extract<Command, { name: "release" }>, beads: BeadsCli
   return `Released ${command.beadId}, reopened it, and cleared its Interlock assignment.`;
 }
 
+function resolveClaim(command: Extract<Command, { name: "resolve" }>, beads: BeadsClient, store: LeaseStore): string {
+  const lease = store.getWorkContractByBeadId(command.beadId);
+  if (lease === undefined) throw new Error(`No local Interlock work contract exists for ${command.beadId}; nothing to resolve`);
+  if (lease.remoteConfirmed) {
+    throw new Error(`Interlock work contract ${lease.workContractId} for ${command.beadId} is already remotely confirmed; use interlock heartbeat, complete, or release`);
+  }
+  if (!lease.remoteAttempted) {
+    store.release({ workContractId: lease.workContractId, owner: lease.owner });
+    return `Resolved ${command.beadId}: the claim never reached Beads, so the unattempted local contract was cleared. The bead can be claimed again.`;
+  }
+  let remote: BeadsIssue;
+  try {
+    remote = beads.getIssue(command.beadId);
+  } catch (error) {
+    throw new Error(`Cannot resolve the ambiguous claim for ${command.beadId}: Beads state could not be read: ${message(error)}. The attempted local contract ${lease.workContractId} remains reserved. Manual step: run \`bd show ${command.beadId}\` once Beads is reachable, decide whether the claim landed, then rerun interlock resolve ${command.beadId}.`);
+  }
+  const expected = metadataFor(lease.workContractId, lease.owner.actor, lease.owner.process, lease.paths, lease.heartbeatAt);
+  if (isExactActiveContract(remote, command.beadId, lease.owner, expected)) {
+    store.confirmRemote({ workContractId: lease.workContractId, owner: lease.owner });
+    return `Resolved ${command.beadId}: the Beads claim landed, so the local contract was confirmed.`;
+  }
+  if (isUnclaimedIssue(remote)) {
+    store.release({ workContractId: lease.workContractId, owner: lease.owner });
+    return `Resolved ${command.beadId}: the Beads claim did not land, so the attempted local contract was cleared. The bead can be claimed again.`;
+  }
+  throw new Error(`Cannot resolve the ambiguous claim for ${command.beadId}: Beads state matches neither an unclaimed issue nor the exact attempted contract ${lease.workContractId}. The attempted local contract remains reserved. Manual step: run \`bd show ${command.beadId}\`; if the claim did not land, clear its assignee and interlock metadata in Beads and rerun interlock resolve ${command.beadId}; if it landed under different metadata, correct the Beads metadata to match the local contract and rerun.`);
+}
+
 function reconcile(beads: BeadsClient, store: LeaseStore): string {
   const processed = reconcileLifecycle(store, beads);
   return processed === 0 ? "Reconciliation found no pending lifecycle events." : `Reconciled ${processed} lifecycle event(s).`;
@@ -303,6 +333,11 @@ function hasRecoveryResult(issue: BeadsIssue, beadId: string, marker: InterlockR
 
 function isActiveMatchingRecovery(issue: BeadsIssue, event: RecoveryEvent): boolean {
   return isExactActiveContract(issue, event.owner.beadId, event.owner, metadataForEvent(event));
+}
+
+function isUnclaimedIssue(issue: BeadsIssue): boolean {
+  return !issue.metadataMalformed && issue.metadata !== undefined && issue.status === "open" && issue.assignee === undefined
+    && !Object.hasOwn(issue.metadata, "interlock");
 }
 
 function isActiveMatchingContract(issue: BeadsIssue, beadId: string, owner: LeaseOwner, metadata: InterlockMetadata): boolean {
@@ -430,7 +465,7 @@ function parseCommand(argv: string[]): Command {
   }
   const beadId = parsed.positionals[0];
   requirePositionals(parsed, 1, name);
-  if (name === "heartbeat" || name === "complete") { requireOnly(parsed, ["repo"]); return { name, beadId, repositoryPath }; }
+  if (name === "heartbeat" || name === "complete" || name === "resolve") { requireOnly(parsed, ["repo"]); return { name, beadId, repositoryPath }; }
   if (name === "release") { requireOnly(parsed, ["reason", "repo"]); return { name, beadId, reason: required(parsed, "reason"), repositoryPath }; }
   throw new Error(`Unknown command: ${name}\n${usage()}`);
 }
@@ -470,5 +505,6 @@ export function usage(): string {
   return ["Usage:", "  interlock claim <bead-id> --actor <actor> --session-pid <pid> --path <path> [--path <path>] [--repo <repo>]",
     "  interlock status <bead-id> [--json] [--repo <repo>]", "  interlock status --all --json [--repo <repo>]", "  interlock heartbeat <bead-id> [--repo <repo>]",
     "  interlock complete <bead-id> [--repo <repo>]", "  interlock release <bead-id> --reason <reason> [--repo <repo>]",
+    "  interlock resolve <bead-id> [--repo <repo>]  (operator: clear or confirm an ambiguous attempted claim after inspecting Beads)",
     "  interlock reconcile [--repo <repo>]", ...coordinationUsage()] .join("\n");
 }

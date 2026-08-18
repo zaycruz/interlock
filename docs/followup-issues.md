@@ -5,10 +5,14 @@ qa-w380-review.md. They are deliberately not fixed in W380 and are accepted
 for the current local, same-user coordination threat model. Each item remains
 tracked here for a future issue/runbook pass.
 
-1. Ambiguous claim wedge — not fixed, accepted risk. A
-   remote_attempted=1 and remote_confirmed=0 contract has no deliberate clear
-   path; only hand-editing SQLite can clear it, and validation may reject that
-   edit. Refs: src/cli/run.ts:118-122; src/core/lease-store.ts:402-407.
+1. Ambiguous claim wedge — FIXED on branch fix/claim-resolve. The new
+   operator command `interlock resolve <bead-id>` inspects the wedged
+   remote_attempted=1 and remote_confirmed=0 contract and checks the actual
+   Beads state: if the claim did not land it clears the attempted contract so
+   the bead can be claimed again, and if the claim landed it confirms the
+   contract into the normal confirmed state. It fails closed with the exact
+   manual `bd show` step when the remote state is unverifiable or unexpected.
+   Refs: src/cli/run.ts:118-122; src/core/lease-store.ts:402-407.
 
 2. Lifecycle lock spans slow Beads calls — not fixed, accepted risk. The
    lifecycle lock is held across slow bd subprocess round-trips; concurrent
