@@ -82,18 +82,30 @@ test("busy panes receive a durable digest on idle exactly once", () => {
   assert.equal(reply.message.toPane, "wT:p1");
 });
 
-test("done transition triggers delivery after a busy pane becomes done", () => {
+test("done transition does not deliver a digest to the finished pane", () => {
   isolatedState();
   register("wT:p1"); register("wT:p4");
   json(authorized(["session", "set", "--pane", "wT:p4", "--state", "busy"], "wT:p4"));
-  const sent = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "done transition notice"], "wT:p1"));
+  json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "done transition notice"], "wT:p1"));
   json(authorized(["task", "add", "--id", "T1", "--title", "Close task", "--value", "Make completion visible", "--pane", "wT:p1"], "wT:p1"));
   json(authorized(["task", "claim", "T1", "--pane", "wT:p1"], "wT:p1"));
   assert.equal(json(authorized(["task", "stage", "T1", "done", "--pane", "wT:p1"], "wT:p1")).digests.length, 0);
   const done = json(authorized(["session", "set", "--pane", "wT:p4", "--state", "done"], "wT:p4"));
-  assert.equal(done.digests.length, 1);
-  assert.deepEqual(done.digests[0].messageIds, [sent.message.id]);
+  assert.equal(done.digests.length, 0);
   assert.equal(json(runCli(["watch", "--once"])).digested, 0);
+});
+
+test("done sessions produce no digest on later sweeps", () => {
+  isolatedState();
+  register("wT:p1"); register("wT:p4");
+  json(authorized(["session", "set", "--pane", "wT:p4", "--state", "done"], "wT:p4"));
+  const sent = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "late notice"], "wT:p1"));
+  assert.equal(json(runCli(["watch", "--once"])).digested, 0);
+  const idle = json(authorized(["session", "set", "--pane", "wT:p1", "--state", "idle"], "wT:p1"));
+  assert.equal(idle.digests.length, 0);
+  const inbox = json(authorized(["inbox", "--pane", "wT:p4", "--json"], "wT:p4"));
+  assert.equal(inbox.messages[0].id, sent.message.id);
+  assert.equal(inbox.digests.length, 0);
 });
 
 test("dashboard is a read-only live view containing business value and digest health", () => {

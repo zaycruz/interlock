@@ -35,10 +35,11 @@ tracked here for a future issue/runbook pass.
    process or one of its ancestors; PID 1 and non-positive PIDs are always
    rejected. Refs: src/cli/run.ts:114; src/core/process-identity.ts:30-92.
 
-4. Plain status opens the writable lease store — not fixed, accepted risk.
-   Non-JSON status can initialize SQLite and write WAL state outside the
-   lifecycle lock; JSON and --all use the read-only reader. It also uses
-   Date.now() instead of the injected clock. Refs: src/cli/run.ts:141-157.
+4. Plain status opens the writable lease store — FIXED 2026-08-18 on branch
+   fix/p3-batch (commit 58b06f7, il-ke1). Plain status now reads leases through
+   the read-only LeaseReader like the --json and --all paths, and computes
+   lease health from the injected dependencies.clock instead of Date.now().
+   Refs: src/cli/run.ts:141-157.
 
 5. Full database validation on every operation — not fixed, accepted risk.
    validatePersistedState scans the complete database for every operation,
@@ -75,9 +76,10 @@ tracked here for a future issue/runbook pass.
    it. Refs: src/coordination/commands.ts:198-216;
    src/coordination/state.ts:65-72.
 
-10. Done sessions receive future digests — not fixed, accepted risk. A done
-    session remains eligible for delivery forever, so future queued messages
-    can continue producing digest files for it. Refs:
+10. Done sessions receive future digests — FIXED 2026-08-18 on branch
+    fix/p3-batch (commit ce109e4, il-7uz). deliverDigests now only considers
+    idle sessions eligible, so a done session produces no new digest on later
+    sweeps; idle and busy behavior is unchanged. Refs:
     src/coordination/commands.ts:198-216.
 
 11. Coordination content is plaintext at rest — not fixed, accepted risk.
@@ -92,9 +94,10 @@ tracked here for a future issue/runbook pass.
     the CLI. Refs: src/coordination/commands.ts:50-125;
     src/coordination/types.ts.
 
-13. Temporary state files are not fsynced or cleaned — not fixed, accepted
-    risk. A crash between temporary write and rename can leave .tmp.<pid>
-    litter, and there is no fsync before rename. Refs:
+13. Temporary state files are not fsynced or cleaned — FIXED 2026-08-18 on
+    branch fix/p3-batch (commit 4044a1f, il-5fa). writeCoordinationState now
+    fsyncs the temporary file before rename and removes stale state.json.tmp.*
+    files in the state directory on every write. Refs:
     src/coordination/state.ts:29-36.
 
 14. First-registration squatting — not fixed, accepted risk. Any local

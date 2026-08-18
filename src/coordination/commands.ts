@@ -240,7 +240,7 @@ function deliverDigests(state: CoordinationState, reason: DigestDelivery["reason
   const deliveries: DigestDelivery[] = [];
   for (const [pane, messages] of byPane) {
     const session = state.sessions.find((candidate) => candidate.pane === pane);
-    if (!session || (session.state !== "idle" && session.state !== "done")) continue;
+    if (!session || session.state !== "idle") continue;
     const id = state.nextDigestId++;
     deliveries.push(writeDigestDelivery(state, { id, pane, messageIds: messages.map((message) => message.id), reason, createdAt: new Date().toISOString() }, messages));
   }

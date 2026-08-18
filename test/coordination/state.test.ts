@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { coordinationLockPath, coordinationStatePath, withCoordinationLock } from "../../src/coordination/state.js";
+import { coordinationLockPath, coordinationStatePath, emptyCoordinationState, withCoordinationLock, writeCoordinationState } from "../../src/coordination/state.js";
 
 const stateDirs: string[] = [];
 const originalStateDir = process.env.INTERLOCK_STATE_DIR;
@@ -109,4 +109,14 @@ test("corrupt existing digest ids refuse loudly instead of guessing a counter", 
   }));
 
   assert.throws(() => withCoordinationLock(() => undefined), /corrupt/);
+});
+
+test("writing state removes stale temporary files left by crashed writers", () => {
+  const directory = isolatedState();
+  const litter = join(directory, "state.json.tmp.99999");
+  writeFileSync(litter, "{}");
+
+  writeCoordinationState(emptyCoordinationState());
+  assert.equal(existsSync(litter), false);
+  assert.equal(existsSync(coordinationStatePath()), true);
 });

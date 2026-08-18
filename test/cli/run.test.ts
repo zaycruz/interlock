@@ -206,6 +206,18 @@ test("status renders a matching heartbeat-expired lease as expired", () => {
   assert.equal(result.exitCode, 0); assert.match(result.stdout, new RegExp(`Lease health: expired \\(heartbeat ${new Date(staleHeartbeatAt).toISOString()}\\)`));
 });
 
+test("plain status reads leases through the read-only reader and the injected clock", () => {
+  const repo = repository(); const beads = new FakeBeads(); assert.equal(claim(repo.path, beads).exitCode, 0);
+  const heartbeatAt = metadata(beads).leaseHealth.heartbeatAt;
+  const result = runCli(["status", "il-1", "--repo", repo.path], {
+    ...dependencies(beads),
+    clock: () => heartbeatAt + DEFAULT_STALE_AFTER_MS + 1,
+    openLeaseStore: () => { throw new Error("plain status must not open the read-write store"); },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, new RegExp(`Lease health: expired \\(heartbeat ${new Date(heartbeatAt).toISOString()}\\)`));
+});
+
 test("an ambiguous Beads claim retains the attempted unconfirmed paths and reconcile never reads Beads for it", () => {
   const repo = repository(); const beads = new FakeBeads(); beads.failClaim = true;
   const result = claim(repo.path, beads);
