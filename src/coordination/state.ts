@@ -254,6 +254,16 @@ export function assertMemberToken(state: CoordinationState, member: string, toke
   if (!safeEqual(expected, actual)) throw new Error("member token does not authenticate " + member);
 }
 
+// ADR 0003 D3: orchestrator powers (pod create/close, appointments) are all
+// token-checked. Fails loudly with the provisioning step when the orchestrator
+// was never initialized.
+export function assertOrchestratorToken(state: CoordinationState, token: string): void {
+  if (state.orchestrator === null || state.memberTokens[ORCHESTRATOR_MEMBER] === undefined) {
+    throw new Error("orchestrator is not initialized; run `interlock orchestrator init` first");
+  }
+  assertMemberToken(state, ORCHESTRATOR_MEMBER, token);
+}
+
 function acquireCoordinationLock(lock: string, owner: CoordinationLockOwner): void {
   const deadline = Date.now() + lockWaitMs();
   for (;;) {
@@ -404,7 +414,7 @@ function orchestratorState(value: unknown): OrchestratorState | null {
   return { initializedAt: value.initializedAt };
 }
 
-function tokenHash(token: string): string { return createHash("sha256").update(token).digest("hex"); }
+export function tokenHash(token: string): string { return createHash("sha256").update(token).digest("hex"); }
 function safeEqual(left: string, right: string): boolean {
   const leftBytes = Buffer.from(left, "utf8");
   const rightBytes = Buffer.from(right, "utf8");

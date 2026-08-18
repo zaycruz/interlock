@@ -37,6 +37,15 @@ function register(pane: string): void {
   paneTokens.set(pane, value);
   json(runCli(["session", "register", "--pane", pane, "--token", value]));
 }
+// Pods route only between members of the same open pod (ADR 0003 D4), so send
+// tests register their panes as pod members and use the engine-minted tokens.
+function registerPod(pod: string, members: string[]): void {
+  const orchestrator = json(runCli(["orchestrator", "init"])).token as string;
+  const template = join(process.env.INTERLOCK_STATE_DIR!, `template-${pod}.json`);
+  writeFileSync(template, JSON.stringify({ members, leader: members[0], succession: [...members] }));
+  const created = json(runCli(["pod", "create", "--name", pod, "--template", template, "--orchestrator-token", orchestrator]));
+  for (const [member, value] of Object.entries(created.tokens as Record<string, string>)) paneTokens.set(member, value);
+}
 function authorized(argv: string[], pane: string): ReturnType<typeof runCli> {
   return runCli([...argv, "--token", paneTokens.get(pane) ?? token(pane)]);
 }
@@ -60,7 +69,7 @@ test("tasks preserve business value and reject the second atomic claimant", () =
 
 test("busy panes receive a durable digest on idle exactly once", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p2");
+  registerPod("eng", ["wT:p1", "wT:p2"]);
   json(authorized(["session", "set", "--pane", "wT:p2", "--state", "busy"], "wT:p2"));
   const sent = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "claim result is ready"], "wT:p1"));
   assert.equal(sent.digests.length, 0);
@@ -84,7 +93,7 @@ test("busy panes receive a durable digest on idle exactly once", () => {
 
 test("done transition does not deliver a digest to the finished pane", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p4");
+  registerPod("eng", ["wT:p1", "wT:p4"]);
   json(authorized(["session", "set", "--pane", "wT:p4", "--state", "busy"], "wT:p4"));
   json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "done transition notice"], "wT:p1"));
   json(authorized(["task", "add", "--id", "T1", "--title", "Close task", "--value", "Make completion visible", "--pane", "wT:p1"], "wT:p1"));
@@ -97,7 +106,7 @@ test("done transition does not deliver a digest to the finished pane", () => {
 
 test("done sessions produce no digest on later sweeps", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p4");
+  registerPod("eng", ["wT:p1", "wT:p4"]);
   json(authorized(["session", "set", "--pane", "wT:p4", "--state", "done"], "wT:p4"));
   const sent = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "late notice"], "wT:p1"));
   assert.equal(json(runCli(["watch", "--once"])).digested, 0);
@@ -124,7 +133,7 @@ test("dashboard is a read-only live view containing business value and digest he
 
 test("pane tokens bind session, sender, inbox, and reply identity", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p2"); register("evil:p9");
+  registerPod("eng", ["wT:p1", "wT:p2"]); register("evil:p9");
   json(authorized(["session", "set", "--pane", "wT:p2", "--state", "busy"], "wT:p2"));
   const sent = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "private work"], "wT:p1"));
 
@@ -222,7 +231,7 @@ test("operator pane cannot reap its own claim", () => {
 
 test("a message sent after counter recovery is not suppressed by digest dedupe", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p2");
+  registerPod("eng", ["wT:p1", "wT:p2"]);
   json(authorized(["session", "set", "--pane", "wT:p2", "--state", "busy"], "wT:p2"));
   const first = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "first notice"], "wT:p1"));
   const idle = json(authorized(["session", "set", "--pane", "wT:p2", "--state", "idle"], "wT:p2"));

@@ -1,13 +1,14 @@
-import { unlinkSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 
+import { closePod, createPod, evaluatePreSend, parsePodTemplate } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
-import { assertMemberToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
+import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
 import { validatePaneName, validateTaskId } from "./validation.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
-const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard", "compact", "orchestrator", "state"]);
+const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard", "compact", "orchestrator", "state", "pod"]);
 const TASK_STAGES: TaskStage[] = ["open", "claimed", "in-progress", "blocked", "done", "closed"];
 
 export function runCoordinationCli(argv: string[]): CoordinationCliResult | null {
@@ -36,6 +37,10 @@ export function coordinationUsage(): string[] {
     "  interlock compact",
     "  interlock orchestrator init [--rotate]  (operator: mint the orchestrator token, printed once; --rotate replaces a lost token)",
     "  interlock state migrate --legacy-pod <name> --legacy-leader <pane>  (operator: one-time version-1 upgrade; run orchestrator init first)",
+    "  interlock pod create --name <pod> --template <file> --orchestrator-token <token>  (member tokens are printed once)",
+    "  interlock pod close --pod <pod> --orchestrator-token <token>",
+    "  interlock pod list [--json]",
+    "  interlock pod show --pod <pod> [--json]",
   ];
 }
 
@@ -50,7 +55,64 @@ function execute(argv: string[]): string {
   if (command === "compact") return compactCommand();
   if (command === "orchestrator") return orchestratorCommand(argv.slice(1));
   if (command === "state") return stateCommand(argv.slice(1));
+  if (command === "pod") return podCommand(argv.slice(1));
   throw new Error(`unknown coordination command: ${command}`);
+}
+
+function podCommand(argv: string[]): string {
+  const subcommand = argv[0];
+  const parsed = parseArgs(argv.slice(1));
+  if (subcommand === "create") {
+    const name = required(parsed, "name");
+    const template = readPodTemplate(required(parsed, "template"));
+    const orchestratorToken = required(parsed, "orchestrator-token");
+    const created = withCoordinationLock((state) => {
+      assertOrchestratorToken(state, orchestratorToken);
+      return createPod(state, name, template);
+    });
+    return JSON.stringify({ ok: true, ...created, notice: "member tokens are printed exactly once; distribute them to member processes out of band" });
+  }
+  if (subcommand === "close") {
+    const name = required(parsed, "pod");
+    const orchestratorToken = required(parsed, "orchestrator-token");
+    const closed = withCoordinationLock((state) => {
+      assertOrchestratorToken(state, orchestratorToken);
+      return closePod(state, name);
+    });
+    return JSON.stringify({ ok: true, ...closed });
+  }
+  // Read-only views, same posture as the dashboard: no token, no mutation.
+  if (subcommand === "list") {
+    const state = readCoordinationState();
+    if (has(parsed, "json")) return JSON.stringify({ ok: true, pods: state.pods });
+    return state.pods.map((pod) => `${pod.name} | ${pod.status} | leader ${pod.leader} | members ${state.podMembers.filter((member) => member.pod === pod.name).length}`).join("\n") || "(no pods)";
+  }
+  if (subcommand === "show") {
+    const name = required(parsed, "pod");
+    const state = readCoordinationState();
+    const pod = state.pods.find((candidate) => candidate.name === name);
+    if (pod === undefined) throw new Error("unknown pod " + name);
+    const members = state.podMembers.filter((member) => member.pod === name);
+    if (has(parsed, "json")) return JSON.stringify({ ok: true, pod, members });
+    const lines = [`POD ${pod.name} | ${pod.status} | leader ${pod.leader} | succession ${pod.succession.join(", ")}`];
+    for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
+    return lines.join("\n");
+  }
+  throw new Error("pod requires create, close, list, or show");
+}
+
+function readPodTemplate(path: string): ReturnType<typeof parsePodTemplate> {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`cannot read pod template ${path}: ${message(error)}`);
+  }
+  try {
+    return parsePodTemplate(JSON.parse(text));
+  } catch (error) {
+    throw new Error(`invalid pod template ${path}: ${message(error)}`);
+  }
 }
 
 function orchestratorCommand(argv: string[]): string {
@@ -158,6 +220,10 @@ function sendCommand(argv: string[]): string {
     if (replyTo !== undefined && parent === undefined) throw new Error(`unknown message #${replyTo}`);
     if (parent && parent.toPane !== fromPane) throw new Error("reply sender " + fromPane + " is not the addressed pane " + parent.toPane);
     const toPane = parent?.fromPane ?? validatePaneName(required(parsed, "to-pane"), "recipient pane");
+    // ADR 0003 D4: the routing boundary is enforced by mechanism, immediately
+    // after token authentication and before any state mutation, through the
+    // single pre-send evaluation seam (see evaluatePreSend in pods.ts).
+    evaluatePreSend(state, fromPane, toPane);
     const id = state.nextMessageId++;
     const now = new Date().toISOString();
     const message: CoordinationMessage = { id, threadId: parent?.threadId ?? id, replyTo: replyTo ?? null, fromPane, toPane, workspace: optional(parsed, "workspace"), text: required(parsed, "text"), state: "queued", claimer: null, createdAt: now };

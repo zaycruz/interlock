@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -31,10 +31,14 @@ function nativeJson(argv: string[]): any {
 test("space.js operations delegate to one Interlock coordination state", () => {
   isolatedState();
   const adapter = createSpaceAdapter();
-  const p1Token = "adapter-token-p1";
-  const p4Token = "adapter-token-p4";
-  nativeJson(["session", "register", "--pane", "wT:p1", "--token", p1Token]);
-  nativeJson(["session", "register", "--pane", "wT:p4", "--token", p4Token]);
+  // The D4 routing boundary only carries sends inside an open pod, so the
+  // adapter's panes are provisioned as pod members with engine-minted tokens.
+  const orchestrator = nativeJson(["orchestrator", "init"]).token as string;
+  const template = join(process.env.INTERLOCK_STATE_DIR!, "template-eng.json");
+  writeFileSync(template, JSON.stringify({ members: ["wT:p1", "wT:p4"], leader: "wT:p1", succession: ["wT:p1", "wT:p4"] }));
+  const created = nativeJson(["pod", "create", "--name", "eng", "--template", template, "--orchestrator-token", orchestrator]);
+  const p1Token = created.tokens["wT:p1"] as string;
+  const p4Token = created.tokens["wT:p4"] as string;
 
   adapter.session({ pane: "wT:p4", token: p4Token, state: "busy" });
   const sent = adapter.send({ fromPane: "wT:p1", toPane: "wT:p4", token: p1Token, text: "branch is ready", workspace: "wT" });
