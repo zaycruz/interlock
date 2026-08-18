@@ -69,6 +69,10 @@ export function runCli(argv: string[], dependencies: CliDependencies = {}): CliR
       return { exitCode: 0, stdout: `${output}\n`, stderr: "" };
     }
     const processor = (dependencies.lifecycleProcessor ?? currentProcessIdentity)();
+    if (command.name === "heartbeat") {
+      const result = heartbeat(command, beads, storeFactory, processor);
+      return { exitCode: 0, stdout: `${result}\n`, stderr: "" };
+    }
     const result = withLifecycleLock(command.repositoryPath, storeFactory, processor, (store) => executeMutating(command, beads, store, identityFor));
     return { exitCode: 0, stdout: `${result}\n`, stderr: "" };
   } catch (error) {
@@ -93,11 +97,10 @@ function withLifecycleLock<T>(repositoryPath: string, storeFactory: (repositoryP
   }
 }
 
-function executeMutating(command: Exclude<Command, { name: "status" }>, beads: BeadsClient, store: LeaseStore,
+function executeMutating(command: Exclude<Command, { name: "status" } | { name: "heartbeat" }>, beads: BeadsClient, store: LeaseStore,
   identityFor: (pid: number) => ProcessIdentity): string {
   switch (command.name) {
     case "claim": return claim(command, beads, store, identityFor);
-    case "heartbeat": return heartbeat(command, beads, store);
     case "complete": return complete(command, beads, store);
     case "release": return release(command, beads, store);
     case "resolve": return resolveClaim(command, beads, store);
@@ -179,18 +182,25 @@ function snapshot(
   } finally { reader?.close(); }
 }
 
-function heartbeat(command: Extract<Command, { name: "heartbeat" }>, beads: BeadsClient, store: LeaseStore): string {
-  const { metadata, owner } = preflightActiveContract(beads, store, command.beadId);
-  const updatedLease = store.heartbeat({ workContractId: metadata.contractId, owner });
-  const nextMetadata = metadataFor(metadata.contractId, metadata.actor, metadata.session, updatedLease.paths, updatedLease.heartbeatAt);
-  try { beads.heartbeat(command.beadId, nextMetadata); } catch (error) {
-    throw new Error(`Local heartbeat succeeded for ${command.beadId} at ${new Date(updatedLease.heartbeatAt).toISOString()}, but Beads metadata sync failed: ${message(error)}. Retry interlock heartbeat ${command.beadId}.`);
-  }
+function heartbeat(command: Extract<Command, { name: "heartbeat" }>, beads: BeadsClient,
+  storeFactory: (repositoryPath: string) => LeaseStore, processor: ProcessIdentity): string {
+  const { issue, observed } = preflightRemoteActiveContract(beads, command.beadId);
+  const renewed = withLifecycleLock(command.repositoryPath, storeFactory, processor, (store) => {
+    const { metadata, owner } = validatePreflightLease(store, command.beadId, issue, observed);
+    const updatedLease = store.heartbeat({ workContractId: metadata.contractId, owner });
+    const nextMetadata = metadataFor(metadata.contractId, metadata.actor, metadata.session, updatedLease.paths, updatedLease.heartbeatAt);
+    // The Beads write stays inside the lock: a lock-free write could land after a concurrent
+    // release/reconcile recovered the bead and re-wedge its cleared Interlock metadata.
+    try { beads.heartbeat(command.beadId, nextMetadata); } catch (error) {
+      throw new Error(`Local heartbeat succeeded for ${command.beadId} at ${new Date(updatedLease.heartbeatAt).toISOString()}, but Beads metadata sync failed: ${message(error)}. Retry interlock heartbeat ${command.beadId}.`);
+    }
+    return { owner, nextMetadata, heartbeatAt: updatedLease.heartbeatAt };
+  });
   try {
     const remote = beads.getIssue(command.beadId);
-    if (!isExactActiveContract(remote, command.beadId, owner, nextMetadata)) throw new Error("Beads returned a different active contract or metadata");
+    if (!isExactActiveContract(remote, command.beadId, renewed.owner, renewed.nextMetadata)) throw new Error("Beads returned a different active contract or metadata");
   } catch (error) {
-    throw new Error(`Local heartbeat succeeded for ${command.beadId} at ${new Date(updatedLease.heartbeatAt).toISOString()}, but exact Beads verification failed: ${message(error)}. The renewed local lease remains reserved; inspect Beads and retry interlock heartbeat ${command.beadId}.`);
+    throw new Error(`Local heartbeat succeeded for ${command.beadId} at ${new Date(renewed.heartbeatAt).toISOString()}, but exact Beads verification failed: ${message(error)}. The renewed local lease remains reserved; inspect Beads and retry interlock heartbeat ${command.beadId}.`);
   }
   return `Heartbeated ${command.beadId}: local lease and Beads metadata are synchronized.`;
 }
@@ -379,11 +389,20 @@ function pendingRecoveryError(beadId: string, error: unknown): Error {
 }
 
 function preflightActiveContract(beads: BeadsClient, store: LeaseStore, beadId: string): { metadata: InterlockMetadata; owner: LeaseOwner; lease: LeaseState } {
+  const { issue, observed } = preflightRemoteActiveContract(beads, beadId);
+  return validatePreflightLease(store, beadId, issue, observed);
+}
+
+function preflightRemoteActiveContract(beads: BeadsClient, beadId: string): { issue: BeadsIssue; observed: InterlockMetadata } {
   const issue = beads.getIssue(beadId);
   const observed = issue.metadata === undefined ? undefined : interlockMetadata(issue.metadata);
   if (observed === undefined || !isActiveMatchingContract(issue, beadId, ownerFromMetadata(beadId, observed), observed)) {
     throw new Error(`Beads issue ${beadId} is not an active matching Interlock contract; local and Beads state were not changed`);
   }
+  return { issue, observed };
+}
+
+function validatePreflightLease(store: LeaseStore, beadId: string, issue: BeadsIssue, observed: InterlockMetadata): { metadata: InterlockMetadata; owner: LeaseOwner; lease: LeaseState } {
   const lease = store.getWorkContract(observed.contractId);
   if (lease === undefined) throw new Error(`Interlock work contract ${observed.contractId} does not exist locally`);
   if (!lease.remoteConfirmed) throw new Error(`Interlock work contract ${observed.contractId} is not remotely confirmed`);
