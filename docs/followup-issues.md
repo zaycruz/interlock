@@ -36,9 +36,13 @@ tracked here for a future issue/runbook pass.
    must not place secrets in them. Refs: src/cli/run.ts:117;
    src/contracts/issue.ts.
 
-7. Unbounded coordination state — not fixed, accepted risk. state.json
-   retains messages and digests without compaction and rewrites the full file
-   on each mutation, increasing the coordination lock window over time. Refs:
+7. Unbounded coordination state — FIXED (growth half) on fix/state-compaction.
+   `interlock compact` removes terminal messages (handled/closed) and digests
+   that no longer cover a retained message, along with their delivery files.
+   nextMessageId/nextDigestId are never lowered, so the persisted counters stay
+   the id high-water mark and dedupe cannot be defeated by deletion. The
+   full-file-rewrite per mutation (the other half of this item) is unchanged
+   and remains accepted risk. Refs: src/coordination/commands.ts;
    src/coordination/state.ts:29-39; src/coordination/types.ts.
 
 8. Counter reset can reuse IDs — not fixed, accepted risk. normalizeState
