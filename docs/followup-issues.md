@@ -10,11 +10,18 @@ tracked here for a future issue/runbook pass.
    path; only hand-editing SQLite can clear it, and validation may reject that
    edit. Refs: src/cli/run.ts:118-122; src/core/lease-store.ts:402-407.
 
-2. Lifecycle lock spans slow Beads calls — not fixed, accepted risk. The
-   lifecycle lock is held across slow bd subprocess round-trips; concurrent
-   heartbeat calls can fail and repeated contention may push live leases past
-   the stale threshold. The result is fail-closed, not corruption. Refs:
-   src/cli/run.ts:70-93.
+2. Lifecycle lock spans slow Beads calls — PARTIALLY FIXED
+   (fix/lifecycle-lock-span). Heartbeat now performs its Beads preflight read
+   before acquiring the lifecycle lock and its post-write verification read
+   after releasing it, so its locked region covers only local validation, the
+   local renewal, and one Beads metadata write. Residual window: the write
+   stays locked because a lock-free write could land after a concurrent
+   release/reconcile recovered the bead and re-wedge its cleared metadata, and
+   claim, complete, release, and reconcile still hold the lock across all
+   their Beads calls — claim check-then-act and the durable-intent recovery
+   protocols require it. A heartbeat that arrives during another command's
+   locked region can still exit 1; retry is safe. Refs: src/cli/run.ts:70-93,
+   src/cli/run.ts:183-204.
 
 3. Arbitrary session PID — not fixed, accepted risk. --session-pid accepts any
    live PID, allowing a caller to bind a lease to another process identity.

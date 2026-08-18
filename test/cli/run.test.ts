@@ -436,6 +436,68 @@ test("status remains diagnostic for invalid contract text and every remote metad
   }
 });
 
+test("heartbeat performs its Beads reads outside the lifecycle lock", () => {
+  const repo = repository(); const beads = new FakeBeads(); assert.equal(claim(repo.path, beads).exitCode, 0);
+  const events: string[] = [];
+  const tracking = new Proxy(beads, {
+    get(target, property, receiver) {
+      if (property === "getIssue" || property === "heartbeat") {
+        return (...args: unknown[]) => {
+          events.push(property === "getIssue" ? "beads:read" : "beads:write");
+          return Reflect.apply(Reflect.get(target, property), target, args);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  const result = runCli(["heartbeat", "il-1", "--repo", repo.path], {
+    ...dependencies(tracking),
+    openLeaseStore: (path: string) => {
+      const target = openLeaseStore(path);
+      return new Proxy(target, {
+        get(value, property, receiver) {
+          if (property === "acquireLifecycleLock" || property === "releaseLifecycleLock") {
+            return (...args: unknown[]) => {
+              events.push(property === "acquireLifecycleLock" ? "lock:acquire" : "lock:release");
+              return Reflect.apply(Reflect.get(value, property), value, args);
+            };
+          }
+          const member = Reflect.get(value, property, receiver);
+          return typeof member === "function" ? member.bind(value) : member;
+        },
+      }) as LeaseStore;
+    },
+  });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.deepEqual(events, ["beads:read", "lock:acquire", "beads:write", "lock:release", "beads:read"]);
+});
+
+test("a concurrent command can take the lifecycle lock while heartbeat waits on its Beads preflight read", () => {
+  const repo = repository(); const beads = new FakeBeads(); assert.equal(claim(repo.path, beads).exitCode, 0);
+  const originalGetIssue = beads.getIssue.bind(beads);
+  let intercepted = false;
+  let contention: string | undefined;
+  beads.getIssue = (id: string) => {
+    const issue = originalGetIssue(id);
+    if (!intercepted) {
+      intercepted = true;
+      const contender = openLeaseStore(repo.path, { processInspector: () => "alive" });
+      try {
+        contender.acquireLifecycleLock({ pid: 99, startedAt: "contender" });
+        contention = "acquired";
+        contender.releaseLifecycleLock({ pid: 99, startedAt: "contender" });
+      } catch { contention = "blocked"; } finally { contender.close(); }
+    }
+    return issue;
+  };
+  const result = runCli(["heartbeat", "il-1", "--repo", repo.path], {
+    ...dependencies(beads),
+    openLeaseStore: (path: string) => openLeaseStore(path, { processInspector: () => "alive" }),
+  });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(contention, "acquired");
+});
+
 test("complete retains staged path scope checks", () => {
   const repo = repository(); const beads = new FakeBeads(); assert.equal(claim(repo.path, beads).exitCode, 0);
   writeFileSync(join(repo.path, "outside.ts"), "export {};\n"); execFileSync("git", ["-C", repo.path, "add", "outside.ts"]); beads.calls = [];
