@@ -32,10 +32,14 @@ function json(result: ReturnType<typeof runCli>): any {
 }
 
 function token(pane: string): string { return "token-" + pane.replace(/[^A-Za-z0-9]/g, "-") + "-secret"; }
-function register(pane: string): void {
-  const value = token(pane);
-  paneTokens.set(pane, value);
-  json(runCli(["session", "register", "--pane", pane, "--token", value]));
+// Pods route only between members of the same open pod (ADR 0003 D4), so send
+// tests register their panes as pod members and use the engine-minted tokens.
+function registerPod(pod: string, members: string[]): void {
+  const orchestrator = json(runCli(["orchestrator", "init"])).token as string;
+  const template = join(process.env.INTERLOCK_STATE_DIR!, `template-${pod}.json`);
+  writeFileSync(template, JSON.stringify({ members, leader: members[0], succession: [...members] }));
+  const created = json(runCli(["pod", "create", "--name", pod, "--template", template, "--orchestrator-token", orchestrator]));
+  for (const [member, value] of Object.entries(created.tokens as Record<string, string>)) paneTokens.set(member, value);
 }
 function authorized(argv: string[], pane: string): ReturnType<typeof runCli> {
   return runCli([...argv, "--token", paneTokens.get(pane) ?? token(pane)]);
@@ -50,7 +54,7 @@ function editState(mutate: (state: any) => void): void {
 
 test("compact removes terminal messages and digests and preserves in-flight state", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p2");
+  registerPod("eng", ["wT:p1", "wT:p2"]);
   json(authorized(["session", "set", "--pane", "wT:p2", "--state", "busy"], "wT:p2"));
   const m1 = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "first"], "wT:p1")).message;
   json(authorized(["session", "set", "--pane", "wT:p1", "--state", "idle"], "wT:p1"));
@@ -83,7 +87,7 @@ test("compact removes terminal messages and digests and preserves in-flight stat
 
 test("compact preserves id-counter floors so a post-compact send is not dedupe-suppressed", () => {
   isolatedState();
-  register("wT:p1"); register("wT:p2");
+  registerPod("eng", ["wT:p1", "wT:p2"]);
   const m1 = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "one"], "wT:p1")).message;
   const m2 = json(authorized(["send", "--from-pane", "wT:p2", "--reply", String(m1.id), "--text", "two"], "wT:p2")).message;
   const m3 = json(authorized(["send", "--from-pane", "wT:p1", "--reply", String(m2.id), "--text", "three"], "wT:p1")).message;
@@ -108,7 +112,7 @@ test("compact on empty or healthy state is a no-op", () => {
   assert.equal(empty.removedMessages, 0);
   assert.equal(empty.removedDigests, 0);
 
-  register("wT:p1"); register("wT:p2");
+  registerPod("eng", ["wT:p1", "wT:p2"]);
   json(authorized(["session", "set", "--pane", "wT:p2", "--state", "idle"], "wT:p2"));
   json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "in flight"], "wT:p1"));
   const before = readFileSync(coordinationStatePath(), "utf8");
