@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import type { CoordinationMessage, CoordinationState, CoordinationTask, CoordinationSession, DigestDelivery } from "./types.js";
 import { validatePaneName, validatePaneToken } from "./validation.js";
+import { assertSupportedPlatform } from "../core/platform.js";
 
 const LOCK_WAIT_MS = 60_000;
 const LOCK_POLL_MS = 10;
@@ -49,6 +50,13 @@ export function writeCoordinationState(state: CoordinationState): void {
     closeSync(descriptor);
   }
   renameSync(temporaryPath, coordinationStatePath());
+  fsyncStateDirectory();
+}
+
+function fsyncStateDirectory(): void {
+  assertSupportedPlatform();
+  const descriptor = openSync(coordinationStateDir(), "r");
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
 }
 
 function removeStaleTemporaryFiles(): void {
