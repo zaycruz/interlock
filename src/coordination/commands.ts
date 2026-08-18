@@ -7,7 +7,6 @@ export interface CoordinationCliResult { exitCode: number; stdout: string; stder
 
 const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard"]);
 const TASK_STAGES: TaskStage[] = ["open", "claimed", "in-progress", "blocked", "done", "closed"];
-const SESSION_STALE_MS = 15 * 60 * 1000;
 
 export function runCoordinationCli(argv: string[]): CoordinationCliResult | null {
   if (!COMMANDS.has(argv[0] ?? "")) return null;
@@ -26,7 +25,7 @@ export function coordinationUsage(): string[] {
     "  interlock task claim <id> --pane <pane> --token <token>",
     "  interlock task progress <id> --pane <pane> --token <token>",
     "  interlock task stage <id> <open|claimed|in-progress|blocked|done|closed> --pane <pane> --token <token>",
-    "  interlock task reap <id> --pane <operator-pane> --token <token> --dead-claimer <pane>",
+    "  interlock task reap <id> --pane <operator-pane> --token <token> --dead-claimer <pane>  (claimer session must be done)",
     "  interlock send --from-pane <pane> --to-pane <pane> --token <token> --text <text> [--workspace <ws>] [--reply <message-id>]",
     "  interlock inbox --pane <pane> --token <token> [--all] [--json]",
     "  interlock session set --pane <pane> --token <token> --state <idle|busy|done>",
@@ -83,14 +82,16 @@ function taskCommand(argv: string[]): string {
       if (candidate.claimer !== deadClaimer) throw new Error("task " + id + " is not claimed by " + deadClaimer);
       const session = state.sessions.find((value) => value.pane === deadClaimer);
       if (session === undefined) throw new Error("dead claimer " + deadClaimer + " has no registered session");
-      const stale = isStaleSession(session.lastSeenAt);
-      if (session.state !== "done" && !stale) throw new Error("dead claimer " + deadClaimer + " must be done or stale before reap");
+      // Staleness is never a death input: lastSeenAt only advances on session set,
+      // so a live but quiet claimer would be wrongfully displaced. Reap requires
+      // the claimer session to be verifiably finished (state done).
+      if (session.state !== "done") throw new Error("dead claimer " + deadClaimer + " must be done before reap");
       candidate.claimer = null;
       candidate.stage = "open";
       candidate.blocker = null;
       candidate.revision += 1;
       candidate.lastProgressAt = new Date().toISOString();
-      return { ...candidate, reapReason: session.state === "done" ? "session-done" : "session-stale" };
+      return { ...candidate, reapReason: "session-done" };
     });
     return JSON.stringify({ ok: true, task });
   }
@@ -225,5 +226,4 @@ function optional(values: Map<string, string | true>, name: string): string | nu
 function requiredToken(values: Map<string, string | true>): string { const value = optional(values, "token") ?? process.env.INTERLOCK_PANE_TOKEN; if (value === undefined || value.trim() === "") throw new Error("--token is required (or set INTERLOCK_PANE_TOKEN)"); return value; }
 function optionalNumber(values: Map<string, string | true>, name: string): number | undefined { const value = optional(values, name); if (value === null) return undefined; const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`--${name} must be a positive integer`); return parsed; }
 function has(values: Map<string, string | true>, name: string): boolean { return values.has(name); }
-function isStaleSession(lastSeenAt: string): boolean { const timestamp = Date.parse(lastSeenAt); return Number.isFinite(timestamp) && Date.now() - timestamp > SESSION_STALE_MS; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

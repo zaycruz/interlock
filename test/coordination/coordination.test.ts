@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -152,10 +152,58 @@ test("done claimer can be explicitly reaped and returned to open", () => {
   json(authorized(["session", "set", "--pane", "wT:p1", "--state", "busy"], "wT:p1"));
   const guarded = authorized(["task", "reap", "REAP1", "--pane", "wT:p2", "--dead-claimer", "wT:p1"], "wT:p2");
   assert.equal(guarded.exitCode, 1);
-  assert.match(guarded.stderr, /done or stale/);
+  assert.match(guarded.stderr, /must be done before reap/);
   json(authorized(["session", "set", "--pane", "wT:p1", "--state", "done"], "wT:p1"));
   const reaped = json(authorized(["task", "reap", "REAP1", "--pane", "wT:p2", "--dead-claimer", "wT:p1"], "wT:p2"));
   assert.equal(reaped.task.stage, "open");
   assert.equal(reaped.task.claimer, null);
   assert.equal(reaped.task.reapReason, "session-done");
+});
+
+test("stale-but-busy live claimer is never reapable on staleness alone", () => {
+  isolatedState();
+  register("wT:p1"); register("wT:p2");
+  json(authorized(["task", "add", "--id", "REAP2", "--title", "Live quiet work", "--value", "Live work must not be displaced", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["task", "claim", "REAP2", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["session", "set", "--pane", "wT:p1", "--state", "busy"], "wT:p1"));
+
+  // Simulate a live agent that stayed quiet past the 15-minute stale threshold.
+  const state = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+  state.sessions[0].lastSeenAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+  writeFileSync(coordinationStatePath(), JSON.stringify(state, null, 2));
+
+  const reaped = authorized(["task", "reap", "REAP2", "--pane", "wT:p2", "--dead-claimer", "wT:p1"], "wT:p2");
+  assert.equal(reaped.exitCode, 1);
+  assert.match(reaped.stderr, /must be done before reap/);
+
+  const listed = json(runCli(["task", "list", "--json"]));
+  assert.equal(listed.tasks[0].claimer, "wT:p1");
+  assert.equal(listed.tasks[0].stage, "claimed");
+});
+
+test("stale idle claimer is not reapable on staleness alone", () => {
+  isolatedState();
+  register("wT:p1"); register("wT:p2");
+  json(authorized(["task", "add", "--id", "REAP3", "--title", "Idle live work", "--value", "Idle is not dead", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["task", "claim", "REAP3", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["session", "set", "--pane", "wT:p1", "--state", "idle"], "wT:p1"));
+
+  const state = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+  state.sessions[0].lastSeenAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+  writeFileSync(coordinationStatePath(), JSON.stringify(state, null, 2));
+
+  const reaped = authorized(["task", "reap", "REAP3", "--pane", "wT:p2", "--dead-claimer", "wT:p1"], "wT:p2");
+  assert.equal(reaped.exitCode, 1);
+  assert.match(reaped.stderr, /must be done before reap/);
+});
+
+test("operator pane cannot reap its own claim", () => {
+  isolatedState();
+  register("wT:p1");
+  json(authorized(["task", "add", "--id", "REAP4", "--title", "Self reap", "--value", "Operator must differ from claimer", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["task", "claim", "REAP4", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["session", "set", "--pane", "wT:p1", "--state", "done"], "wT:p1"));
+  const selfReap = authorized(["task", "reap", "REAP4", "--pane", "wT:p1", "--dead-claimer", "wT:p1"], "wT:p1");
+  assert.equal(selfReap.exitCode, 1);
+  assert.match(selfReap.stderr, /cannot reap itself/);
 });

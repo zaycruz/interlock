@@ -79,8 +79,14 @@ tracked here for a future issue/runbook pass.
     The planned mitigation is Herdr-boundary token provisioning per the
     commit directive. Source: qa-w380-review.md re-review 2026-08-15.
 
-15. Reap guard admits a stale-but-busy claimer — not fixed, accepted risk.
-    lastSeenAt only advances on session set, so a live agent quiet for more
-    than 15 minutes is reap-able by any registered operator pane. Tighten
-    the guard to done-only or add a session heartbeat. Source:
-    qa-w380-review.md re-review 2026-08-15.
+15. Reap guard admits a stale-but-busy claimer — FIXED on branch
+    fix/reap-guard. Reap now requires the claimer session state to be done;
+    staleness is never a death input, because lastSeenAt only advances on
+    session set and a live agent quiet for more than 15 minutes was reap-able
+    by any registered operator pane. Verified-death via process identity was
+    not wired: coordination sessions carry no process identity and each CLI
+    invocation is a short-lived process, so no durable pane pid exists to
+    inspect. Consequence: a crashed agent that never set done can no longer
+    be reaped; a session heartbeat or pane process registration is the
+    follow-up if that wedges work. Source: qa-w380-review.md re-review
+    2026-08-15.
