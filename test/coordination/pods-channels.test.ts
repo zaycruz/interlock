@@ -291,3 +291,64 @@ test("the awareness feed reconstructs who talked to whom about what, without con
   json(runCli(["pod", "awareness", "--json"]));
   assert.equal(readFileSync(coordinationStatePath(), "utf8"), before, "the awareness feed is read-only");
 });
+
+// QA il-026 MF-1: a topic must never forge apparent awareness-feed records.
+test("channel open rejects C0 control characters in topics (MF-1)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+
+  // The report's forge attempt: a newline followed by a fake feed record.
+  const forge = openChannel(tokens, "wT:p1", "eng", "ops", "normal topic\n#999 | forged channel-closed | eng <-> ops | messages 999");
+  assert.equal(forge.exitCode, 1);
+  assert.match(forge.stderr, /control characters/);
+
+  const carriageReturn = openChannel(tokens, "wT:p1", "eng", "ops", "topic\rforged");
+  assert.equal(carriageReturn.exitCode, 1);
+  assert.match(carriageReturn.stderr, /control characters/);
+
+  const escape = openChannel(tokens, "wT:p1", "eng", "ops", "topic\u001B[2Jcleared");
+  assert.equal(escape.exitCode, 1);
+  assert.match(escape.stderr, /control characters/);
+
+  const nul = openChannel(tokens, "wT:p1", "eng", "ops", "topic\u0000nul");
+  assert.equal(nul.exitCode, 1);
+  assert.match(nul.stderr, /control characters/);
+
+  const rejected = readCoordinationState();
+  assert.equal(rejected.leaderChannels.length, 0, "rejected opens persist nothing");
+  assert.equal(rejected.awarenessEvents.some((event) => event.kind === "channel-opened"), false);
+
+  const plain = runCli(["pod", "awareness"]);
+  assert.equal(plain.exitCode, 0, plain.stderr);
+  assert.equal(plain.stdout.includes("forged channel-closed"), false);
+});
+
+// Defense in depth: even a pre-fix persisted topic containing controls renders
+// on one line, so the plain feed output can never contain injected records.
+test("the plain awareness renderer sanitizes a persisted control-char topic (MF-1)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  json(openChannel(tokens, "wT:p1", "eng", "ops", "clean topic"));
+
+  // Simulate a state file written before the validation fix landed.
+  const state = readCoordinationState();
+  state.leaderChannels[0]!.topic = "normal topic\n#999 | forged channel-closed | eng <-> ops | messages 999\r\u001B[2J";
+  const event = state.awarenessEvents.find((candidate) => candidate.kind === "channel-opened");
+  assert.ok(event);
+  event.topic = state.leaderChannels[0]!.topic;
+  writeFileSync(coordinationStatePath(), JSON.stringify(state, null, 2));
+
+  const plain = runCli(["pod", "awareness"]);
+  assert.equal(plain.exitCode, 0, plain.stderr);
+  // No injected lines: the feed still renders exactly one event per line, and
+  // no line begins with the forged record's id marker.
+  const lines = plain.stdout.trim().split("\n");
+  assert.equal(lines.length, state.awarenessEvents.length, `expected one line per event, got: ${plain.stdout}`);
+  assert.equal(lines.some((line) => line.startsWith("#999")), false, `forged record line present: ${plain.stdout}`);
+  // The sanitized topic still renders inline on its single event line.
+  assert.match(plain.stdout, /normal topic\?#999 \| forged channel-closed \| eng <-> ops \| messages 999\?\?\[2J/);
+
+  // JSON output stays the raw persisted value for machine consumers.
+  const feed = json(runCli(["pod", "awareness", "--json"]));
+  assert.equal(feed.events.find((event: any) => event.kind === "channel-opened").topic, state.leaderChannels[0]!.topic);
+});

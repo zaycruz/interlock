@@ -37,9 +37,17 @@ export interface ClosedChannel {
 // bounded so the awareness feed stays a scannable index.
 export const CHANNEL_TOPIC_MAX_LENGTH = 140;
 
+// QA il-026 MF-1: C0 control characters (in particular CR, LF, and ESC) are
+// rejected outright: the awareness feed renders topics into line-oriented
+// text, so a newline in a topic could forge apparent feed records and terminal
+// controls could alter rendering. The plain renderer also sanitizes topics
+// defensively so a pre-fix persisted value cannot forge lines either.
+const C0_CONTROL = /[\u0000-\u001F]/;
+
 export function validateChannelTopic(value: string): string {
   const topic = typeof value === "string" ? value.trim() : "";
   if (topic === "") throw new Error("channel topic is required at open time and must not be blank (ADR 0003 D4)");
+  if (C0_CONTROL.test(topic)) throw new Error("channel topic must not contain control characters (CR, LF, ESC, or other C0 controls)");
   if (topic.length > CHANNEL_TOPIC_MAX_LENGTH) throw new Error(`channel topic must be at most ${CHANNEL_TOPIC_MAX_LENGTH} characters, got ${topic.length}`);
   return topic;
 }

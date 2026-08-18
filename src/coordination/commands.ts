@@ -148,6 +148,12 @@ function channelCommand(argv: string[]): string {
 
 // ADR 0003 D5: the awareness feed is metadata-only — who talked to whom and
 // about what, never message content. Read-only, same posture as the dashboard.
+// QA il-026 MF-1 defense in depth: even a pre-fix persisted topic containing
+// control characters must render on one line; C0 controls and DEL are replaced.
+function sanitizeFeedText(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/g, "?");
+}
+
 function awarenessCommand(argv: string[]): string {
   const parsed = parseArgs(argv);
   const state = readCoordinationState();
@@ -158,7 +164,7 @@ function awarenessCommand(argv: string[]): string {
   if (has(parsed, "json")) return JSON.stringify({ ok: true, events });
   return events.map((event) => {
     const parties = event.pod ?? `${event.fromPod ?? "?"} <-> ${event.toPod ?? "?"}`;
-    const detail = event.topic ?? event.member ?? "";
+    const detail = sanitizeFeedText(event.topic ?? event.member ?? "");
     const count = event.messageCount === undefined ? "" : ` | messages ${event.messageCount}`;
     return `#${event.id} | ${event.createdAt} | ${event.kind} | ${parties}${detail === "" ? "" : ` | ${detail}`}${count}`;
   }).join("\n") || "(no awareness events)";
