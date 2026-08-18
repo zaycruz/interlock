@@ -78,10 +78,12 @@ Known limitations, disclosed plainly:
   whichever local process registers that pane name first. A local process can
   squat an unclaimed pane name. Provision pane names you care about early,
   and treat unexpected registration conflicts as a signal to investigate.
-- **`--session-pid` is trusted.** The lease lifecycle accepts any live
-  process ID as a session identity. A caller can bind leases to a process it
-  does not own, which delays stale-session reclamation. This matches the
-  cooperative same-user model; do not rely on PID binding as proof of
+- **`--session-pid` is caller-scoped.** The lease lifecycle accepts only the
+  calling process or one of its ancestors as a session identity; foreign
+  process IDs (including PID 1) are rejected. Within the same-user model this
+  is a courtesy check, not a security boundary — a caller can still bind
+  leases to a long-lived ancestor (for example its shell) and delay
+  stale-session reclamation. Do not rely on PID binding as proof of
   identity.
 - **Beads metadata is visible to repo collaborators.** Interlock records
   actor, PID, process start time, and leased repository-relative paths in
