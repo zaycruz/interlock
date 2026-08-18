@@ -1,3 +1,5 @@
+import type { ProcessIdentity } from "../core/types.js";
+
 export type TaskStage = "open" | "claimed" | "in-progress" | "blocked" | "done" | "closed";
 export type SessionState = "idle" | "busy" | "done";
 export type MessageStage = "queued" | "claimed" | "handled" | "closed";
@@ -44,11 +46,66 @@ export interface DigestDelivery {
   file: string;
 }
 
+export interface Pod {
+  name: string;
+  createdAt: string;
+  leader: string;
+  succession: string[];
+  status: "open" | "closed";
+  closedAt: string | null;
+}
+
+export interface PodMember {
+  member: string;
+  pod: string;
+  role: "leader" | "worker";
+  process: ProcessIdentity | null;
+  registeredAt: string;
+}
+
+export interface LeaderChannel {
+  id: number;
+  fromPod: string;
+  toPod: string;
+  topic: string;
+  openedAt: string;
+  closedAt: string | null;
+  messageCount: number;
+}
+
+export type AwarenessEventKind = "pod-created" | "pod-closed" | "channel-opened" | "channel-closed"
+  | "leader-death-verified" | "leader-promoted" | "leader-done";
+
+// Metadata only: pod names, member names, topic, messageCount. Never text (ADR 0003 D1/D5).
+export interface AwarenessEvent {
+  id: number;
+  kind: AwarenessEventKind;
+  createdAt: string;
+  pod?: string;
+  fromPod?: string;
+  toPod?: string;
+  member?: string;
+  members?: string[];
+  topic?: string;
+  messageCount?: number;
+}
+
+export interface OrchestratorState {
+  initializedAt: string;
+}
+
 export interface CoordinationState {
-  version: 1;
+  version: 2;
   nextMessageId: number;
   nextDigestId: number;
-  paneTokens: Record<string, string>;
+  nextChannelId: number;
+  nextAwarenessEventId: number;
+  memberTokens: Record<string, string>;
+  pods: Pod[];
+  podMembers: PodMember[];
+  leaderChannels: LeaderChannel[];
+  awarenessEvents: AwarenessEvent[];
+  orchestrator: OrchestratorState | null;
   tasks: CoordinationTask[];
   messages: CoordinationMessage[];
   sessions: CoordinationSession[];

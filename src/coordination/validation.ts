@@ -4,6 +4,10 @@ export function validatePaneName(value: string, label = "pane"): string {
   return validateCoordinationName(value, label);
 }
 
+export function validateMemberName(value: string, label = "member"): string {
+  return validateCoordinationName(value, label);
+}
+
 export function validateTaskId(value: string, label = "task id"): string {
   return validateCoordinationName(value, label);
 }
@@ -15,9 +19,9 @@ export function validateCoordinationName(value: string, label: string): string {
   return value;
 }
 
-export function validatePaneToken(value: string): string {
+export function validateMemberToken(value: string): string {
   if (typeof value !== "string" || value.length < 8 || value.length > 512 || value.trim() !== value) {
-    throw new Error("pane token must be between 8 and 512 non-whitespace characters");
+    throw new Error("member token must be between 8 and 512 non-whitespace characters");
   }
   return value;
 }
