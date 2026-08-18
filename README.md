@@ -20,7 +20,7 @@ The coordination CLI is available through the `interlock` command:
 interlock session register --pane <pane> --token <pane-token>
 interlock task add --id <id> --title <title> --value <business-value> --pane <pane> --token <pane-token>
 interlock task claim <id> --pane <pane> --token <pane-token>
-interlock task reap <id> --pane <operator-pane> --token <operator-token> --dead-claimer <pane>
+interlock task reap <id> --pane <operator-pane> --token <operator-token> --dead-claimer <pane>  # claimer session must be done; staleness alone never allows reap
 interlock send --from-pane <pane> --to-pane <pane> --token <pane-token> --text <text>
 interlock inbox --pane <pane> --token <pane-token> --json
 interlock session set --pane <pane> --token <pane-token> --state <idle|busy|done>

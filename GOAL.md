@@ -35,7 +35,7 @@ Interlock holds the claim until the agent completes it or the agent session is v
 The unified interlock product adds a file-backed local coordination plane for
 cross-pane messages, business-valued task claims, durable idle/done digests,
 and a read-only dashboard. Pane mutations are authenticated by per-pane
-tokens, dead claims have an explicit done/stale reap path, and completion
+tokens, dead claims have an explicit done-only reap path, and completion
 reconciliation retries only exact active Beads contracts. Plane remains the
 broader work-item authority to integrate after its live claim/lease semantics
 are verified.
