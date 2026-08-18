@@ -186,6 +186,56 @@ test("an ambiguous Beads claim retains the attempted unconfirmed paths and recon
   assert.equal(reconcile.exitCode, 0); assert.deepEqual(beads.calls, []);
 });
 
+function ambiguousClaim(path: string, beads: FakeBeads): void {
+  beads.failClaim = true;
+  const result = claim(path, beads);
+  assert.equal(result.exitCode, 1); assert.match(result.stderr, /outcome is ambiguous/);
+  beads.failClaim = false; beads.calls = [];
+}
+
+test("resolve clears the attempted contract when Beads shows the claim did not land", () => {
+  const repo = repository(); const beads = new FakeBeads(); ambiguousClaim(repo.path, beads);
+  const result = runCli(["resolve", "il-1", "--repo", repo.path], dependencies(beads));
+  assert.equal(result.exitCode, 0); assert.match(result.stdout, /did not land/);
+  const store = openLeaseStore(repo.path); assert.equal(store.getWorkContractByBeadId("il-1"), undefined); store.close();
+  assert.equal(claim(repo.path, beads).exitCode, 0);
+});
+
+test("resolve confirms the attempted contract when Beads shows the claim landed", () => {
+  const repo = repository(); const beads = new FakeBeads(); ambiguousClaim(repo.path, beads);
+  const store = openLeaseStore(repo.path); const lease = store.getWorkContractByBeadId("il-1"); store.close();
+  assert.ok(lease !== undefined);
+  activeIssueFor(beads, lease.workContractId, lease.heartbeatAt);
+  const result = runCli(["resolve", "il-1", "--repo", repo.path], dependencies(beads));
+  assert.equal(result.exitCode, 0); assert.match(result.stdout, /landed/);
+  const confirmed = openLeaseStore(repo.path); assert.equal(confirmed.getWorkContract(lease.workContractId)?.remoteConfirmed, true); confirmed.close();
+  assert.equal(runCli(["heartbeat", "il-1", "--repo", repo.path], dependencies(beads)).exitCode, 0);
+});
+
+test("resolve refuses with the manual step when Beads state is unverifiable", () => {
+  const repo = repository(); const beads = new FakeBeads(); ambiguousClaim(repo.path, beads);
+  beads.failRead = true;
+  const result = runCli(["resolve", "il-1", "--repo", repo.path], dependencies(beads));
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /bd show il-1/); assert.match(result.stderr, /remains reserved/);
+  const store = openLeaseStore(repo.path);
+  const lease = store.getWorkContractByBeadId("il-1");
+  assert.equal(lease?.remoteAttempted, true); assert.equal(lease?.remoteConfirmed, false);
+  store.close();
+});
+
+test("resolve refuses an unexpected remote state and a confirmed contract", () => {
+  const repo = repository(); const beads = new FakeBeads(); ambiguousClaim(repo.path, beads);
+  beads.issue.assignee = "other-agent"; beads.issue.status = "in_progress";
+  const unexpected = runCli(["resolve", "il-1", "--repo", repo.path], dependencies(beads));
+  assert.equal(unexpected.exitCode, 1); assert.match(unexpected.stderr, /Manual step: run `bd show il-1`/);
+  const store = openLeaseStore(repo.path); assert.ok(store.getWorkContractByBeadId("il-1") !== undefined); store.close();
+  const healthy = repository(); const healthyBeads = new FakeBeads();
+  assert.equal(claim(healthy.path, healthyBeads).exitCode, 0);
+  const confirmed = runCli(["resolve", "il-1", "--repo", healthy.path], dependencies(healthyBeads));
+  assert.equal(confirmed.exitCode, 1); assert.match(confirmed.stderr, /already remotely confirmed/);
+});
+
 test("the lifecycle lock blocks a mutating command before any Beads read when owner inspection is unknown", () => {
   const repo = repository();
   const holder = openLeaseStore(repo.path, { processInspector: () => "alive" }); holder.acquireLifecycleLock({ pid: 88, startedAt: "holder" }); holder.close();
