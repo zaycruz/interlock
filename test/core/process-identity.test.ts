@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { currentProcessIdentity, inspectProcess, processIdentityFor } from "../../src/core/index.js";
+import { currentProcessIdentity, inspectProcess, processIdentityFor, sessionProcessIdentityFor } from "../../src/core/index.js";
 
 test("uses a strong identity for the current Linux process", { skip: process.platform !== "linux" }, () => {
   const identity = currentProcessIdentity();
@@ -16,6 +17,26 @@ test("uses a strong identity for the current Linux process", { skip: process.pla
 test("derives a stable identity from a supplied live session PID", () => {
   assert.deepEqual(processIdentityFor(process.pid), currentProcessIdentity());
   assert.throws(() => processIdentityFor(0), /live stable identity/);
+});
+
+test("session identity accepts the caller and its ancestors", () => {
+  assert.deepEqual(sessionProcessIdentityFor(process.pid), currentProcessIdentity());
+  assert.equal(sessionProcessIdentityFor(process.ppid).pid, process.ppid);
+});
+
+test("session identity rejects foreign live processes and pid 1", () => {
+  assert.throws(() => sessionProcessIdentityFor(1), /not the calling process or an ancestor/);
+  assert.throws(() => sessionProcessIdentityFor(0), /not the calling process or an ancestor/);
+  assert.throws(() => sessionProcessIdentityFor(99_998), /not the calling process or an ancestor/);
+
+  const child = spawn("sleep", ["30"]);
+  try {
+    const childPid = child.pid;
+    assert.ok(childPid !== undefined);
+    assert.throws(() => sessionProcessIdentityFor(childPid), /not the calling process or an ancestor/);
+  } finally {
+    child.kill("SIGKILL");
+  }
 });
 
 test("classifies an absent Darwin PID as dead from the signal-zero probe", { skip: process.platform !== "darwin" }, () => {

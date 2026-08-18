@@ -123,6 +123,38 @@ test("claim creates an attempted local contract then confirms the exact active B
   assert.equal(beads.issue.status, "in_progress"); assert.equal(beads.issue.assignee, "agent-a");
 });
 
+test("claim rejects a --session-pid outside the caller's own ancestry", () => {
+  const repo = repository(); const beads = new FakeBeads();
+  const result = runCli(["claim", "il-1", "--actor", "agent-a", "--session-pid", "1", "--path", "src/owned.ts", "--repo", repo.path],
+    { beads, lifecycleProcessor: () => command });
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /--session-pid 1 is not the calling process or an ancestor of it/);
+  assert.deepEqual(beads.calls, ["get"]);
+  const store = openLeaseStore(repo.path); assert.equal(store.getWorkContractByBeadId("il-1"), undefined); store.close();
+});
+
+test("claim accepts the caller's own pid and an ancestor pid as --session-pid", () => {
+  for (const pid of [process.pid, process.ppid]) {
+    const repo = repository(); const beads = new FakeBeads();
+    const result = runCli(["claim", "il-1", "--actor", "agent-a", "--session-pid", String(pid), "--path", "src/owned.ts", "--repo", repo.path],
+      { beads, lifecycleProcessor: () => command });
+    assert.equal(result.exitCode, 0, `pid ${pid}`);
+    assert.equal(metadata(beads).session.pid, pid);
+  }
+});
+
+test("claim still rejects a missing or invalid --session-pid at parse time", () => {
+  const repo = repository(); const beads = new FakeBeads();
+  for (const argv of [
+    ["claim", "il-1", "--actor", "agent-a", "--path", "src/owned.ts", "--repo", repo.path],
+    ["claim", "il-1", "--actor", "agent-a", "--session-pid", "abc", "--path", "src/owned.ts", "--repo", repo.path],
+  ]) {
+    const result = runCli(argv, { beads, lifecycleProcessor: () => command });
+    assert.equal(result.exitCode, 1); assert.match(result.stderr, /--session-pid must be a positive integer/);
+    assert.deepEqual(beads.calls, []);
+  }
+});
+
 test("claim rejects observed active, assigned, raw-interlock, and invalid-contract issues before local lease acquisition", () => {
   for (const setup of [
     (beads: FakeBeads) => { activeIssueFor(beads, "existing-contract"); },

@@ -16,9 +16,13 @@ tracked here for a future issue/runbook pass.
    the stale threshold. The result is fail-closed, not corruption. Refs:
    src/cli/run.ts:70-93.
 
-3. Arbitrary session PID — not fixed, accepted risk. --session-pid accepts any
-   live PID, allowing a caller to bind a lease to another process identity.
-   Refs: src/cli/run.ts:114; src/core/process-identity.ts:22-28.
+3. Arbitrary session PID — FIXED 2026-08-18 on branch fix/session-pid-ancestry.
+   --session-pid accepted any live PID, allowing a caller to bind a lease to
+   another process identity. Resolution: claim now resolves the session
+   through sessionProcessIdentityFor, which walks the caller's parent chain
+   (ps on Darwin, /proc on Linux) and rejects any PID that is not the calling
+   process or one of its ancestors; PID 1 and non-positive PIDs are always
+   rejected. Refs: src/cli/run.ts:114; src/core/process-identity.ts:30-92.
 
 4. Plain status opens the writable lease store — not fixed, accepted risk.
    Non-JSON status can initialize SQLite and write WAL state outside the
