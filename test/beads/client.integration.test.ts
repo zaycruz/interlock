@@ -23,6 +23,12 @@ function repository(): TestRepository {
   repositories.push(value);
   exec(value.path, ["init", "--non-interactive", "--skip-hooks", "--skip-agents", "--prefix", "interlocktest", "--quiet"]);
   assert.equal(existsSync(join(value.path, "AGENTS.md")), false);
+  // bd init auto-stages its .beads housekeeping files and clears the index
+  // only through a bootstrap commit that needs a resolvable git identity.
+  // Where that identity is missing (Linux CI runners), the commit fails and
+  // the staged set stays polluted. The work contract judges agent-staged
+  // paths, not bd bookkeeping, so unstage whatever init left behind.
+  execFileSync("git", ["-C", value.path, "reset", "--quiet"]);
   return value;
 }
 
