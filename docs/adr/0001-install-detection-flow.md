@@ -164,8 +164,11 @@ impersonated installers, not about crossing OS user boundaries.
   call.
   Setup mitigates by printing the resolved binary path in the plan, so the
   user sees *which* herdr will be touched before consenting.
-- **No downgrade via repair.** The repair path only moves the plugin to the
-  version the engine expects; it never silently downgrades herdr or the
+- **No downgrade via repair.** When the active plugin is older than the
+  engine expects, repair moves it forward. When the active plugin is NEWER
+  than the engine expects (engine is the stale component), repair refuses
+  the downgrade, reports the mismatch, and tells the user to upgrade the
+  engine instead. It never silently downgrades herdr, the plugin, or the
   engine.
 - **Uninstall completeness.** `--remove` leaves no interlock-registered
   tokens or pane mappings behind in herdr; the plugin's own teardown
