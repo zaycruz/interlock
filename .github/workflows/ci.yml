@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install beads CLI (macOS)
+        if: runner.os == 'macOS'
+        run: brew install beads
+
+      - name: Install beads CLI (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          BD_VERSION=1.2.2
+          curl -fsSLO "https://github.com/steveyegge/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/steveyegge/beads/releases/download/v${BD_VERSION}/checksums.txt"
+          grep "beads_${BD_VERSION}_linux_amd64.tar.gz" checksums.txt | shasum -a 256 -c -
+          tar xzf "beads_${BD_VERSION}_linux_amd64.tar.gz" bd
+          mkdir -p "$RUNNER_TEMP/bin"
+          mv bd "$RUNNER_TEMP/bin/bd"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
