@@ -44,3 +44,69 @@ test("a lock owned by a dead process is reclaimed without leaving a lock behind"
   assert.equal(readFileSync(coordinationStatePath(), "utf8").includes("lastWatchAt"), true);
   assert.throws(() => readFileSync(coordinationLockPath(), "utf8"), /ENOENT/);
 });
+
+test("a corrupted nextMessageId recovers above the highest existing message id", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify({
+    nextMessageId: 1,
+    messages: [{ id: 7 }, { id: 3 }],
+  }));
+
+  withCoordinationLock((state) => { assert.equal(state.nextMessageId, 8); });
+  assert.equal(JSON.parse(readFileSync(coordinationStatePath(), "utf8")).nextMessageId, 8);
+});
+
+test("a nextMessageId equal to the highest existing message id recovers above it", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify({
+    nextMessageId: 7,
+    messages: [{ id: 7 }],
+  }));
+
+  withCoordinationLock((state) => { assert.equal(state.nextMessageId, 8); });
+});
+
+test("a corrupted nextDigestId recovers above the highest existing digest id", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify({
+    nextDigestId: "corrupt",
+    digests: [{ id: 4 }, { id: 2 }],
+  }));
+
+  withCoordinationLock((state) => { assert.equal(state.nextDigestId, 5); });
+});
+
+test("a healthy counter above the highest existing id is preserved", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify({
+    nextMessageId: 12,
+    nextDigestId: 9,
+    messages: [{ id: 7 }],
+    digests: [{ id: 4 }],
+  }));
+
+  withCoordinationLock((state) => {
+    assert.equal(state.nextMessageId, 12);
+    assert.equal(state.nextDigestId, 9);
+  });
+});
+
+test("corrupt existing message ids refuse loudly instead of guessing a counter", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify({
+    nextMessageId: 1,
+    messages: [{ id: "oops" }],
+  }));
+
+  assert.throws(() => withCoordinationLock(() => undefined), /corrupt/);
+});
+
+test("corrupt existing digest ids refuse loudly instead of guessing a counter", () => {
+  isolatedState();
+  writeFileSync(coordinationStatePath(), JSON.stringify({
+    nextDigestId: 1,
+    digests: [{ id: -3 }],
+  }));
+
+  assert.throws(() => withCoordinationLock(() => undefined), /corrupt/);
+});

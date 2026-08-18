@@ -41,10 +41,14 @@ tracked here for a future issue/runbook pass.
    on each mutation, increasing the coordination lock window over time. Refs:
    src/coordination/state.ts:29-39; src/coordination/types.ts.
 
-8. Counter reset can reuse IDs — not fixed, accepted risk. normalizeState
-   resets corrupted nextMessageId or nextDigestId values to 1, which can
-   reuse IDs and silently suppress a new digest during deduplication. Refs:
-   src/coordination/state.ts:75-82.
+8. Counter reset can reuse IDs — FIXED on branch fix/id-counter-floor.
+   normalizeState used to reset corrupted nextMessageId or nextDigestId
+   values to 1, which could reuse IDs and silently suppress a new digest
+   during deduplication. normalizeState now derives a missing, corrupted,
+   or too-low counter as max(existing ids of that kind) + 1, preserves a
+   healthy counter above that floor, and refuses loudly when an existing
+   message or digest id is itself corrupt. Refs:
+   src/coordination/state.ts:73-85.
 
 9. Partial digest delivery can duplicate — not fixed, accepted risk. If one
    pane's digest file write fails after another pane succeeds, the persisted
