@@ -207,3 +207,21 @@ test("operator pane cannot reap its own claim", () => {
   assert.equal(selfReap.exitCode, 1);
   assert.match(selfReap.stderr, /cannot reap itself/);
 });
+
+test("a message sent after counter recovery is not suppressed by digest dedupe", () => {
+  isolatedState();
+  register("wT:p1"); register("wT:p2");
+  json(authorized(["session", "set", "--pane", "wT:p2", "--state", "busy"], "wT:p2"));
+  const first = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "first notice"], "wT:p1"));
+  const idle = json(authorized(["session", "set", "--pane", "wT:p2", "--state", "idle"], "wT:p2"));
+  assert.deepEqual(idle.digests[0].messageIds, [first.message.id]);
+
+  const corrupted = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+  corrupted.nextMessageId = 1;
+  writeFileSync(coordinationStatePath(), JSON.stringify(corrupted, null, 2));
+
+  const second = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--text", "second notice"], "wT:p1"));
+  assert.equal(second.message.id, first.message.id + 1);
+  assert.equal(second.digests.length, 1);
+  assert.deepEqual(second.digests[0].messageIds, [second.message.id]);
+});

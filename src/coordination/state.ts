@@ -73,14 +73,14 @@ export function writeDigestDelivery(state: CoordinationState, digest: Omit<Diges
 function normalizeState(value: unknown): CoordinationState {
   if (!isRecord(value)) throw new Error("state is not an object");
   const state = emptyCoordinationState();
-  state.nextMessageId = positiveInteger(value.nextMessageId, 1);
-  state.nextDigestId = positiveInteger(value.nextDigestId, 1);
   state.paneTokens = paneTokens(value.paneTokens);
   state.tasks = arrayOf<CoordinationTask>(value.tasks);
   state.messages = arrayOf<CoordinationMessage>(value.messages);
   state.sessions = arrayOf<CoordinationSession>(value.sessions);
   state.digests = arrayOf<DigestDelivery>(value.digests);
   state.lastWatchAt = typeof value.lastWatchAt === "string" ? value.lastWatchAt : null;
+  state.nextMessageId = idCounter(value.nextMessageId, highestId(state.messages, "message"));
+  state.nextDigestId = idCounter(value.nextDigestId, highestId(state.digests, "digest"));
   return state;
 }
 
@@ -184,7 +184,18 @@ function safeEqual(left: string, right: string): boolean {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 function arrayOf<T>(value: unknown): T[] { return Array.isArray(value) ? structuredClone(value) as T[] : []; }
-function positiveInteger(value: unknown, fallback: number): number { return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : fallback; }
+function highestId(items: ReadonlyArray<{ id: unknown }>, kind: string): number {
+  let highest = 0;
+  for (const item of items) {
+    if (!isRecord(item) || !Number.isSafeInteger(item.id) || (item.id as number) <= 0) throw new Error(`coordination ${kind} id is corrupt`);
+    highest = Math.max(highest, item.id as number);
+  }
+  return highest;
+}
+function idCounter(value: unknown, highestExistingId: number): number {
+  const floor = highestExistingId + 1;
+  return Number.isSafeInteger(value) && (value as number) >= floor ? value as number : floor;
+}
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isMissingFile(error: unknown): boolean { return isNodeError(error) && error.code === "ENOENT"; }
 function isExisting(error: unknown): boolean { return isNodeError(error) && error.code === "EEXIST"; }
