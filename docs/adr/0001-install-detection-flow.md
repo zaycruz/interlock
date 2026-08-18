@@ -1,6 +1,6 @@
 # ADR-0001: Install detection and setup flow
 
-- Status: Proposed
+- Status: Accepted (QA adversarial architecture review PASS, verdict #643; head-office ratification #649, 2026-08-18)
 - Date: 2026-08-17
 - Deciders: interlock team
 - Sources: `DIRECTIVE.md` ("Community release, 2026-08-17"), pods plan Product

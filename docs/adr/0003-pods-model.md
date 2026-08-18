@@ -1,6 +1,6 @@
 # ADR 0003: Pods model
 
-- Status: Proposed (pending adversarial architecture review, per DIRECTIVE.md)
+- Status: Accepted (QA adversarial architecture review PASS, verdict #643, MF-A..E resolved at e59af35; head-office ratification #649, 2026-08-18)
 - Date: 2026-08-17
 - Product authority: `docs/plans/2026-08-17-001-feat-pods-model-plan.md` (R1–R20,
   F1–F6, AE1–AE6). That contract is the WHAT/WHY and is non-negotiable. This ADR
