@@ -63,7 +63,10 @@ export const MAX_ROSTER_SIZE = 16;
 // claimed (or answered, which marks it handled) before it can be closed —
 // otherwise mail could vanish without ever surfacing in a digest.
 const TASK_STAGE_TRANSITIONS: Record<TaskStage, ReadonlySet<TaskStage>> = {
-  open: new Set<TaskStage>(["claimed", "closed"]),
+  // open -> closed is deliberately absent: task mutation is owner-only, and
+  // an open task has no owner, so the edge would be unreachable. Withdrawing
+  // unclaimed work is a task remove concern, not a stage transition.
+  open: new Set<TaskStage>(["claimed"]),
   claimed: new Set<TaskStage>(["open", "in-progress", "blocked", "done", "closed"]),
   "in-progress": new Set<TaskStage>(["open", "in-progress", "blocked", "done", "closed"]),
   blocked: new Set<TaskStage>(["open", "in-progress", "done", "closed"]),

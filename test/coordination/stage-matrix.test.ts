@@ -105,11 +105,60 @@ test("an open task cannot be staged at all before it is claimed (owner-only muta
 
 test("a claimed task can be released back to open and reclaimed through the matrix", () => {
   isolatedState();
-  registerPod("eng", ["wT:p1"]);
+  registerPod("eng", ["wT:p1", "wT:p2"]);
   addTask("T3");
   json(authorized(["task", "claim", "T3", "--pane", "wT:p1"], "wT:p1"));
-  json(authorized(["task", "stage", "T3", "open", "--pane", "wT:p1"], "wT:p1"));
-  assert.equal(taskStage("T3"), "open");
+  // Release to open clears the claim atomically: the reopened task can
+  // actually be claimed again, by anyone.
+  const released = json(authorized(["task", "stage", "T3", "open", "--pane", "wT:p1"], "wT:p1")).task;
+  assert.equal(released.stage, "open");
+  assert.equal(released.claimer, null);
+  const reclaimed = json(authorized(["task", "claim", "T3", "--pane", "wT:p2"], "wT:p2")).task;
+  assert.equal(reclaimed.claimer, "wT:p2");
+  assert.equal(taskStage("T3"), "claimed");
+});
+
+test("task reap cannot resurrect a terminal task (il-2t8)", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p2"]);
+  addTask("T4");
+  json(authorized(["task", "claim", "T4", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["task", "stage", "T4", "done", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["session", "set", "--pane", "wT:p1", "--state", "done"], "wT:p1"));
+
+  // QA repro: reaping the finished claimer used to return done -> open.
+  const reap = authorized(["task", "reap", "T4", "--pane", "wT:p2", "--dead-claimer", "wT:p1"], "wT:p2");
+  assert.equal(reap.exitCode, 1);
+  assert.match(reap.stderr, /cannot move from done to open/, reap.stderr);
+  assert.equal(taskStage("T4"), "done");
+
+  // Closed is terminal too, through the release alias, on a separate task
+  // created by the still-live worker (the done leader above has shed task
+  // authority per D6).
+  addTask("T4B", "wT:p2");
+  json(authorized(["task", "claim", "T4B", "--pane", "wT:p2"], "wT:p2"));
+  json(authorized(["task", "stage", "T4B", "done", "--pane", "wT:p2"], "wT:p2"));
+  json(authorized(["task", "stage", "T4B", "closed", "--pane", "wT:p2"], "wT:p2"));
+  json(authorized(["session", "set", "--pane", "wT:p2", "--state", "done"], "wT:p2"));
+  const release = authorized(["task", "release", "T4B", "--pane", "wT:p1", "--dead-claimer", "wT:p2"], "wT:p1");
+  assert.equal(release.exitCode, 1);
+  assert.match(release.stderr, /cannot move from closed to open/, release.stderr);
+  assert.equal(taskStage("T4B"), "closed");
+});
+
+test("task reap of a live (non-terminal) claim still returns it to open", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p2"]);
+  addTask("T5");
+  json(authorized(["task", "claim", "T5", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["task", "stage", "T5", "in-progress", "--pane", "wT:p1"], "wT:p1"));
+  json(authorized(["session", "set", "--pane", "wT:p1", "--state", "done"], "wT:p1"));
+
+  const reaped = json(authorized(["task", "reap", "T5", "--pane", "wT:p2", "--dead-claimer", "wT:p1"], "wT:p2")).task;
+  assert.equal(reaped.stage, "open");
+  assert.equal(reaped.claimer, null);
+  // And the reopened task is claimable.
+  assert.equal(json(authorized(["task", "claim", "T5", "--pane", "wT:p2"], "wT:p2")).task.claimer, "wT:p2");
 });
 
 test("inbox claim and inbox close make the claimed and closed message stages reachable", () => {

@@ -259,6 +259,10 @@ function taskCommand(argv: string[]): string {
       // so a live but quiet claimer would be wrongfully displaced. Reap requires
       // the claimer session to be verifiably finished (state done).
       if (session.state !== "done") throw new Error("dead claimer " + deadClaimer + " must be done before reap");
+      // il-2t8: reap returns live work to open through the same matrix as
+      // every other stage move — a done or closed task is terminal and is
+      // never resurrected, even for a finished claimer.
+      assertTaskStageTransition(id, candidate.stage, "open");
       candidate.claimer = null;
       candidate.stage = "open";
       candidate.blocker = null;
@@ -297,6 +301,10 @@ function taskCommand(argv: string[]): string {
       // il-2t8: the owner drives the task along the transition matrix; jumps
       // that reopen terminal work or manufacture claims are refused.
       assertTaskStageTransition(id, task.stage, stage);
+      // A transition back to open is a release: the claim leaves with the
+      // stage, so the reopened task can actually be claimed again.
+      if (stage === "open") { task.claimer = null; task.blocker = null; }
+      if (stage === "blocked") task.blocker = "declared by " + pane;
       task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
       const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
       return { task: { ...task }, digests };
