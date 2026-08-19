@@ -39,6 +39,13 @@ export interface ClosedChannel {
 // bounded so the awareness feed stays a scannable index.
 export const CHANNEL_TOPIC_MAX_LENGTH = 140;
 
+// ADR 0003 OQ2: the awareness feed is append-only, so writes cap it at the
+// most recent AWARENESS_FEED_MAX_EVENTS events. The id counter is never
+// lowered: a dropped event's id is never reused, and the retained suffix is
+// always a contiguous run of the highest ids, so reconstruction from the feed
+// remains well-defined for every event still present.
+export const AWARENESS_FEED_MAX_EVENTS = 1000;
+
 // QA il-026 MF-1: C0 control characters (in particular CR, LF, and ESC) are
 // rejected outright: the awareness feed renders topics into line-oriented
 // text, so a newline in a topic could forge apparent feed records and terminal
@@ -318,6 +325,9 @@ function membershipOf(state: CoordinationState, member: string): { pod: Pod; mem
 export function appendAwarenessEvent(state: CoordinationState, kind: AwarenessEventKind, fields: Partial<Omit<AwarenessEvent, "id" | "kind" | "createdAt">>): AwarenessEvent {
   const event: AwarenessEvent = { id: state.nextAwarenessEventId++, kind, createdAt: new Date().toISOString(), ...fields };
   state.awarenessEvents.push(event);
+  if (state.awarenessEvents.length > AWARENESS_FEED_MAX_EVENTS) {
+    state.awarenessEvents.splice(0, state.awarenessEvents.length - AWARENESS_FEED_MAX_EVENTS);
+  }
   return event;
 }
 

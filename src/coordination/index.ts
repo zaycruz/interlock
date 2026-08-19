@@ -1,5 +1,5 @@
 export { runCoordinationCli, coordinationUsage } from "./commands.js";
-export { assertSendAllowed, CHANNEL_TOPIC_MAX_LENGTH, closeLeaderChannel, closePod, createPod, evaluatePreSend, openLeaderChannel, parsePodTemplate, validateChannelTopic } from "./pods.js";
+export { assertSendAllowed, AWARENESS_FEED_MAX_EVENTS, CHANNEL_TOPIC_MAX_LENGTH, closeLeaderChannel, closePod, createPod, evaluatePreSend, openLeaderChannel, parsePodTemplate, validateChannelTopic } from "./pods.js";
 export { buildDashboardView, renderDashboard } from "./render.js";
 export { assertMemberToken, assertOrchestratorToken, coordinationLockPath, coordinationStateDir, coordinationStatePath, emptyCoordinationState, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeCoordinationState } from "./state.js";
 export { createSpaceAdapter } from "./space-adapter.js";
