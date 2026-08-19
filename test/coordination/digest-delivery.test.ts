@@ -3,13 +3,13 @@
 // idempotently-keyed artifact that the inbox re-materializes, so a lost file
 // never causes the next sweep to duplicate the digest.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { runCli } from "../../src/cli/index.js";
-import { readCoordinationState } from "../../src/coordination/state.js";
+import { coordinationDeliveryDir, coordinationStatePath, readCoordinationState } from "../../src/coordination/state.js";
 
 const stateDirs: string[] = [];
 const originalStateDir = process.env.INTERLOCK_STATE_DIR;
@@ -100,4 +100,55 @@ test("an intact digest delivery repairs nothing and later messages digest separa
   assert.equal(state.digests.filter((digest) => digest.messageIds.includes(first.messageId)).length, 1);
   assert.equal(state.digests.filter((digest) => digest.messageIds.includes(second.messageId)).length, 1);
   assert.notEqual(first.digestId, second.digestId);
+});
+
+test("a crash between delivery-file write and state commit never reuses the orphaned digest id (il-yhw)", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p2"]);
+  const first = sendAndDigest("committed result");
+
+  // Simulate the crash window: a second delivery file reached disk but the
+  // state commit carrying its digest record did not. The counter must floor
+  // against the artifact, not just state.digests.
+  const orphanId = first.digestId + 1;
+  const orphanDir = join(coordinationDeliveryDir(), "wT:p2");
+  mkdirSync(orphanDir, { recursive: true });
+  const orphanFile = join(orphanDir, `digest-${orphanId}.json`);
+  writeFileSync(orphanFile, JSON.stringify({ id: orphanId, pane: "wT:p2", messageIds: [999], reason: "agent-idle", createdAt: new Date().toISOString(), file: orphanFile, messages: [] }));
+  const orphanContent = readFileSync(orphanFile, "utf8");
+
+  // The next delivery must take a fresh id and leave the orphan untouched.
+  const second = sendAndDigest("post-crash result");
+  assert.equal(second.digestId, orphanId + 1);
+  assert.equal(readFileSync(orphanFile, "utf8"), orphanContent);
+
+  const state = readCoordinationState();
+  assert.equal(state.nextDigestId, orphanId + 2);
+});
+
+test("inbox repair runs under the coordination lock and never erases a concurrent send (il-yhw)", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p2"]);
+  const { digestFile } = sendAndDigest("first result");
+  unlinkSync(digestFile);
+
+  // A send accepted between the would-be snapshot and the repair write must
+  // survive. With the repair inside the lock the commands serialize, so the
+  // final state carries both the repair and the message.
+  const inbox = json(authorized(["inbox", "--pane", "wT:p2", "--json"], "wT:p2"));
+  assert.equal(inbox.redelivered.length, 1);
+  json(authorized(["session", "set", "--pane", "wT:p1", "--state", "busy"], "wT:p1"));
+  const sent = json(authorized(["send", "--from-pane", "wT:p2", "--to-pane", "wT:p1", "--text", "concurrent send"], "wT:p2")).message;
+
+  // Re-read through a fresh locked inbox: the message and the repaired digest
+  // are both present, and nothing rewound the state file.
+  const after = json(authorized(["inbox", "--pane", "wT:p1", "--json"], "wT:p1"));
+  assert.equal(after.messages.some((message: any) => message.id === sent.id), true);
+  const persisted = readCoordinationState();
+  assert.equal(persisted.messages.some((message) => message.id === sent.id), true);
+  assert.equal(existsSync(digestFile), true);
+
+  // And the state file on disk matches the locked view (no stale overwrite).
+  const onDisk = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+  assert.equal(onDisk.messages.some((message: any) => message.id === sent.id), true);
 });

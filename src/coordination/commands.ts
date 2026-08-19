@@ -2,7 +2,7 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
 import { assertMessageStageTransition, assertNotDoneLeader, assertTaskStageTransition, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
-import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeCoordinationState, writeDigestDelivery, writeDigestDeliveryFile } from "./state.js";
+import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery, writeDigestDeliveryFile } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, MessageStage, SessionState, TaskStage } from "./types.js";
 import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
 import { sessionProcessIdentityFor } from "../core/process-identity.js";
@@ -369,22 +369,27 @@ function inboxCommand(argv: string[]): string {
     return JSON.stringify({ ok: true, message: result });
   }
   const parsed = parseArgs(argv);
-  const state = readCoordinationState();
   const pane = validatePaneName(required(parsed, "pane"));
-  assertMemberToken(state, pane, requiredToken(parsed));
-  const messages = state.messages.filter((message) => message.toPane === pane && (has(parsed, "all") || message.state === "queued" || message.state === "claimed"));
-  const digests = state.digests.filter((digest) => digest.pane === pane);
-  // il-yhw: a digest whose delivery file was lost to a partial failure is
-  // still the durable record. Repair it here — the file is idempotently
-  // keyed by digest id, so rewriting converges instead of duplicating — and
-  // surface it as redelivered so the pane knows its digest is readable again.
-  const repaired: number[] = [];
-  for (const digest of digests) {
-    if (existsSync(digest.file)) continue;
-    writeDigestDeliveryFile(digest, state.messages.filter((message) => digest.messageIds.includes(message.id)));
-    repaired.push(digest.id);
-  }
-  if (repaired.length > 0) writeCoordinationState(state);
+  const token = requiredToken(parsed);
+  const result = withCoordinationLock((state) => {
+    assertMemberToken(state, pane, token);
+    const messages = state.messages.filter((message) => message.toPane === pane && (has(parsed, "all") || message.state === "queued" || message.state === "claimed"));
+    const digests = state.digests.filter((digest) => digest.pane === pane);
+    // il-yhw: a digest whose delivery file was lost to a partial failure is
+    // still the durable record. Repair it inside the lock — the file is
+    // idempotently keyed by digest id, so rewriting converges instead of
+    // duplicating — and surface it as redelivered. Running under the lock is
+    // what keeps a concurrent send from being erased by a stale snapshot.
+    const repaired: number[] = [];
+    for (const digest of digests) {
+      if (existsSync(digest.file)) continue;
+      writeDigestDeliveryFile(digest, state.messages.filter((message) => digest.messageIds.includes(message.id)));
+      repaired.push(digest.id);
+    }
+    return { messages, digests, repaired };
+  });
+  const { messages, digests } = result;
+  const repaired = result.repaired;
   if (has(parsed, "json")) return JSON.stringify({ ok: true, pane, messages, digests, redelivered: repaired });
   const lines = [`INBOX ${pane}`, ...messages.map((message) => `#${message.id} ${message.state} ${message.fromPane} -> ${message.toPane}: ${message.text}`), "DIGEST DELIVERIES", ...digests.map((digest) => `#${digest.id} ${digest.reason} messages=${digest.messageIds.map((id) => `#${id}`).join(",")} file=${digest.file}`)];
   return `${lines.join("\n")}\n`;
