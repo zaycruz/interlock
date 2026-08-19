@@ -208,13 +208,25 @@ export function migrateLegacyCoordinationState(legacyPod: string, legacyLeader: 
 
 export function writeDigestDelivery(state: CoordinationState, digest: Omit<DigestDelivery, "file">, messages: CoordinationMessage[]): DigestDelivery {
   validatePaneName(digest.pane);
-  const paneDir = join(coordinationDeliveryDir(), digest.pane);
-  mkdirSync(paneDir, { recursive: true });
-  const file = join(paneDir, `digest-${digest.id}.json`);
-  const delivery: DigestDelivery = { ...digest, file };
-  writeFileSync(file, JSON.stringify({ ...delivery, messages }, null, 2));
+  // il-yhw: exactly-once under partial failure. The persisted digest record
+  // is the durable marker that suppresses re-delivery; the delivery file is
+  // a re-materializable artifact of that record. Record the digest first,
+  // then write the file — a file-write failure leaves the digest persisted,
+  // so the next sweep skips it instead of duplicating it, and the inbox
+  // surfaces the missing file for redelivery instead of pretending it landed.
+  const delivery: DigestDelivery = { ...digest, file: join(coordinationDeliveryDir(), digest.pane, `digest-${digest.id}.json`) };
   state.digests.push(delivery);
+  writeDigestDeliveryFile(delivery, messages);
   return delivery;
+}
+
+// Re-materializes the delivery file for a persisted digest. Idempotent: the
+// filename is keyed by the digest id, so a rewrite after a partial failure
+// converges on the same content instead of duplicating.
+export function writeDigestDeliveryFile(delivery: DigestDelivery, messages: CoordinationMessage[]): void {
+  const paneDir = join(coordinationDeliveryDir(), delivery.pane);
+  mkdirSync(paneDir, { recursive: true });
+  writeFileSync(delivery.file, JSON.stringify({ ...delivery, messages }, null, 2));
 }
 
 function normalizeState(value: unknown): CoordinationState {
