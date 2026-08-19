@@ -1,11 +1,11 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
-import { closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
+import { assertNotDoneLeader, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
 import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
-import { currentProcessIdentity, inspectProcess } from "../core/process-identity.js";
+import { sessionProcessIdentityFor } from "../core/process-identity.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -40,9 +40,7 @@ export function coordinationUsage(): string[] {
     "  interlock state migrate --legacy-pod <name> --legacy-leader <pane>  (operator: one-time version-1 upgrade; run orchestrator init first)",
     "  interlock pod create --name <pod> --template <file> --orchestrator-token <token>  (member tokens are printed once)",
     "  interlock pod close --pod <pod> --orchestrator-token <token>",
-    "  interlock pod bind --member <member> --token <token> --identity-pid <pid> --identity-started-at <start>  (host-adapter registration bind; the engine re-verifies the identity live)",
-    "  interlock pod unbind --member <member> --token <token>",
-    "  interlock pod rebind --member <member> --token <token>  (verified-dead identity only; binds the calling process, no --pid)",
+    "  interlock pod rebind --member <member> --token <token> [--pid <pid>]  (verified-dead identity only; binds the caller or an ancestor process)",
     "  interlock pod list [--json]",
     "  interlock pod show --pod <pod> [--json]",
     "  interlock pod channel open --pod <pod> --to-pod <pod> --member <leader> --token <token> --topic <topic>  (topic required, max 140 chars)",
@@ -91,46 +89,15 @@ function podCommand(argv: string[]): string {
     });
     return JSON.stringify({ ok: true, ...closed });
   }
-  if (subcommand === "bind") {
-    const member = validateMemberName(required(parsed, "member"));
-    const token = requiredToken(parsed);
-    const pid = Number(required(parsed, "identity-pid"));
-    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("--identity-pid must be a positive integer");
-    const startedAt = required(parsed, "identity-started-at");
-    const bound = withCoordinationLock((state) => {
-      assertMemberToken(state, member, token);
-      const identity = { pid, startedAt };
-      // The engine never trusts a caller-asserted identity: the bind is
-      // rejected unless the named process is alive right now. `ambiguous`
-      // (weak ps precision on the lstart second) still confirms a live process
-      // with a matching start time; only dead, mismatched, and unknown refuse.
-      const status = inspectProcess(identity);
-      if (status !== "alive" && status !== "ambiguous") {
-        throw new Error("process identity " + pid + " / " + startedAt + " is not alive; a member binds only a live process");
-      }
-      return rebindMemberProcess(state, member, identity);
-    });
-    return JSON.stringify({ ok: true, member: bound });
-  }
-  if (subcommand === "unbind") {
-    const member = validateMemberName(required(parsed, "member"));
-    const token = requiredToken(parsed);
-    const unbound = withCoordinationLock((state) => {
-      assertMemberToken(state, member, token);
-      const entry = state.podMembers.find((candidate) => candidate.member === member);
-      if (entry === undefined) throw new Error("member " + member + " is not in a pod");
-      entry.process = null;
-      return entry;
-    });
-    return JSON.stringify({ ok: true, member: unbound });
-  }
   if (subcommand === "rebind") {
     const member = validateMemberName(required(parsed, "member"));
     const token = requiredToken(parsed);
-    // ADR 0003 D6 (MF-A): no --pid flag. The rebind binds the calling
-    // process's own identity, captured engine-side; a token holder cannot pin
-    // the member's identity to a foreign or immortal process.
-    const identity = currentProcessIdentity();
+    // ADR 0003 D6 (MF-A): the rebind binds the calling process's own identity
+    // engine-side. An optional --pid names the caller or one of its ancestors
+    // (the il-8o3 session guard); a foreign pid is rejected, so a stolen token
+    // can never pin the member to an unrelated or immortal process.
+    const pidArg = optionalNumber(parsed, "pid");
+    const identity = pidArg === undefined ? sessionProcessIdentityFor(process.pid) : sessionProcessIdentityFor(pidArg);
     const rebound = withCoordinationLock((state) => {
       assertMemberToken(state, member, token);
       return rebindMemberProcess(state, member, identity);
@@ -154,7 +121,7 @@ function podCommand(argv: string[]): string {
     for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
     return lines.join("\n");
   }
-  throw new Error("pod requires create, close, bind, unbind, rebind, list, or show");
+  throw new Error("pod requires create, close, rebind, list, or show");
 }
 
 function channelCommand(argv: string[]): string {
@@ -257,6 +224,7 @@ function taskCommand(argv: string[]): string {
     const token = requiredToken(parsed);
     const task = withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task add");
       if (state.tasks.some((candidate) => candidate.id === id)) throw new Error(`task ${id} already exists`);
       const now = new Date().toISOString();
       const ownerPane = optional(parsed, "owner-pane");
@@ -301,6 +269,7 @@ function taskCommand(argv: string[]): string {
   if (subcommand === "claim") {
     return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task claim");
       const task = findTask(state, id);
       if (task.stage !== "open" || task.claimer !== null) {
         throw new Error(`claim_conflict: task ${id} is ${task.stage}, claimed by ${task.claimer ?? "unknown"} (revision ${task.revision})`);
@@ -312,6 +281,7 @@ function taskCommand(argv: string[]): string {
   if (subcommand === "progress") {
     return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task progress");
       const task = ownedTask(state, id, pane); if (task.stage === "claimed") task.stage = "in-progress"; task.revision += 1; task.lastProgressAt = new Date().toISOString(); return { ...task };
     }) });
   }
@@ -320,6 +290,7 @@ function taskCommand(argv: string[]): string {
     if (!stage || !TASK_STAGES.includes(stage)) throw new Error(`task stage must be one of ${TASK_STAGES.join("|")}`);
     const result = withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task stage");
       const task = ownedTask(state, id, pane); task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
       const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
       return { task: { ...task }, digests };

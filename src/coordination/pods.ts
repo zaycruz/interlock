@@ -109,6 +109,8 @@ export function createPod(state: CoordinationState, name: string, template: PodT
     role: member === template.leader ? "leader" : "worker",
     process: null,
     registeredAt: now,
+    diedAt: null,
+    doneAt: null,
   }));
   for (const member of template.members) state.memberTokens[member] = tokenHash(tokens[member]!);
   state.pods.push(pod);
@@ -163,18 +165,23 @@ export function evaluateSuccession(state: CoordinationState, member: string): vo
   if (pod.status !== "open") return;
   const leader = state.podMembers.find((candidate) => candidate.member === pod.leader && candidate.pod === pod.name);
   if (leader === undefined || leader.process === null) return;
+  // Terminal marker: a leader already verified dead is never re-evaluated, so
+  // leader-death-verified fires exactly once per leader (idempotent lifecycle).
+  if (leader.diedAt !== null) return;
   const status = inspectProcess(leader.process);
   if (status !== "dead" && status !== "mismatched") return;
 
+  leader.diedAt = new Date().toISOString();
   appendAwarenessEvent(state, "leader-death-verified", { pod: pod.name, member: leader.member });
-  // The dead leader's token must not survive as a posthumous forgery path
-  // (MF-B); the hash is deleted in the same locked mutation as the promotion.
-  delete state.memberTokens[leader.member];
 
   for (const candidate of pod.succession) {
     if (candidate === leader.member) continue;
     const successor = state.podMembers.find((entry) => entry.member === candidate && entry.pod === pod.name);
     if (successor === undefined || successor.process === null) continue;
+    // The successor must be able to authenticate as the pod's new leader: a
+    // missing token hash would promote an unreachable leader and strand the
+    // pod's external reach. Fail closed — keep the pod leaderless in place.
+    if (state.memberTokens[successor.member] === undefined) continue;
     // `ambiguous` (weak ps precision) still confirms a live process with a
     // matching start time; only `dead`, `mismatched`, and `unknown` disqualify
     // a successor. Promotion fires only on the leader's verified death, never
@@ -184,12 +191,16 @@ export function evaluateSuccession(state: CoordinationState, member: string): vo
     leader.role = "worker";
     successor.role = "leader";
     pod.leader = successor.member;
+    // The dead leader's token must not survive as a posthumous forgery path
+    // (MF-B); the hash is deleted only when a reachable successor takes over.
+    delete state.memberTokens[leader.member];
     appendAwarenessEvent(state, "leader-promoted", { pod: pod.name, member: successor.member });
     return;
   }
-  // Every candidate is dead or unverifiable: the pod keeps its roster, loses
-  // external reach (the dead leader stays in place, unverifiable), and waits
-  // for the orchestrator. It never closes (R15).
+  // Every candidate is dead, unverifiable, or unauthenticated: the pod keeps
+  // its roster and its dead leader's token (fail closed — the roster still
+  // authenticates), loses external reach, and waits for the orchestrator. It
+  // never closes (R15).
 }
 
 // ADR 0003 D6 (MF-A): rebind lifecycle. A member whose recorded identity has
@@ -221,6 +232,9 @@ export function recordLeaderDone(state: CoordinationState, member: string): void
   const entry = membershipOf(state, member);
   if (entry === undefined) return;
   if (entry.member.role !== "leader" || entry.pod.status !== "open") return;
+  // Terminal marker: leader-done fires once, on the transition into done.
+  if (entry.member.doneAt !== null) return;
+  entry.member.doneAt = new Date().toISOString();
   appendAwarenessEvent(state, "leader-done", { pod: entry.pod.name, member });
   const now = new Date().toISOString();
   for (const channel of state.leaderChannels) {
@@ -228,6 +242,17 @@ export function recordLeaderDone(state: CoordinationState, member: string): void
     if (channel.fromPod !== entry.pod.name && channel.toPod !== entry.pod.name) continue;
     channel.closedAt = now;
     appendAwarenessEvent(state, "channel-closed", { fromPod: channel.fromPod, toPod: channel.toPod, topic: channel.topic, messageCount: channel.messageCount });
+  }
+}
+
+// ADR 0003 D6 (MF-C): a leader that reported done sheds all external and
+// task-mutation authority; only intra-pod messaging survives while the pod
+// waits for the orchestrator. Enforced at every mutation boundary.
+export function assertNotDoneLeader(state: CoordinationState, member: string, action: string): void {
+  const entry = membershipOf(state, member);
+  if (entry === undefined) return;
+  if (entry.member.role === "leader" && entry.member.doneAt !== null) {
+    throw new Error(action + " rejected: leader " + member + " has reported done and no longer holds that authority");
   }
 }
 
@@ -240,6 +265,11 @@ export function assertSendAllowed(state: CoordinationState, fromMember: string, 
     if (channelId !== undefined) throw new Error("send rejected: the orchestrator is not a leader-channel endpoint; reports to the orchestrator do not ride channels");
     const leader = fromMember === ORCHESTRATOR_MEMBER ? toMember : fromMember;
     const entry = membershipOf(state, leader);
+    // ADR 0003 D6 (MF-C): a leader that reported done sheds external reach,
+    // including reports to the orchestrator, while it waits for appointment.
+    if (entry !== undefined && entry.member.doneAt !== null && entry.member.role === "leader") {
+      throw new Error("send rejected: leader " + entry.member.member + " has reported done and no longer has external reach");
+    }
     if (fromMember === ORCHESTRATOR_MEMBER && (entry === undefined || entry.pod.status !== "open" || entry.member.role !== "leader")) {
       throw new Error("send rejected: the orchestrator can only message pod leaders, never workers");
     }
@@ -254,6 +284,12 @@ export function assertSendAllowed(state: CoordinationState, fromMember: string, 
   if (to === undefined) throw new Error("send rejected: member " + toMember + " is not in a pod");
   if (from.pod.status === "closed") throw new Error("send rejected: pod " + from.pod.name + " is closed");
   if (to.pod.status === "closed") throw new Error("send rejected: pod " + to.pod.name + " is closed");
+  // ADR 0003 D6 (MF-C): a leader that reported done sheds external reach. A
+  // done leader cannot send outside its pod — not to another pod, not to the
+  // orchestrator — while it waits for the orchestrator to appoint or close.
+  if (from.member.doneAt !== null && from.member.role === "leader" && from.pod.name !== to.pod.name) {
+    throw new Error("send rejected: leader " + fromMember + " has reported done and no longer has external reach");
+  }
   // Rule 1: same pod, any member to any member including the leader.
   if (from.pod.name === to.pod.name) {
     if (channelId !== undefined) throw new Error("send rejected: leader channels carry cross-pod sends only, not intra-pod mail");

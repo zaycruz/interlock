@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { runCli } from "../../src/cli/index.js";
 import { currentProcessIdentity, inspectProcess } from "../../src/core/process-identity.js";
-import { emptyCoordinationState, readCoordinationState, writeCoordinationState } from "../../src/coordination/state.js";
+import { coordinationStatePath, readCoordinationState, writeCoordinationState } from "../../src/coordination/state.js";
 import type { CoordinationState } from "../../src/coordination/types.js";
 import type { ProcessIdentity } from "../../src/core/types.js";
 
@@ -296,47 +296,12 @@ test("the promoted successor immediately has the pod's external reach", () => {
   assert.equal(state.messages[0]?.toPane, "wT:p2");
 });
 
-test("pod bind records a process identity for a roster member and is token-checked", () => {
-  isolatedState();
-  const { tokens } = twoPods();
-  const identity = liveIdentity();
-
-  const forged = runCli(["pod", "bind", "--member", "wT:p2", "--token", "forged-token", "--identity-pid", String(identity.pid), "--identity-started-at", identity.startedAt]);
-  assert.equal(forged.exitCode, 1);
-  assert.match(forged.stderr, /does not authenticate/);
-
-  const outsider = runCli(["pod", "bind", "--member", "wT:p9", "--token", tokens.get("wT:p1")!, "--identity-pid", String(identity.pid), "--identity-started-at", identity.startedAt]);
-  assert.equal(outsider.exitCode, 1);
-  assert.match(outsider.stderr, /not registered/);
-
-  const bound = json(runCli(["pod", "bind", "--member", "wT:p2", "--token", tokens.get("wT:p2")!, "--identity-pid", String(identity.pid), "--identity-started-at", identity.startedAt]));
-  assert.equal(bound.member.member, "wT:p2");
-  const member = readCoordinationState().podMembers.find((candidate) => candidate.member === "wT:p2");
-  assert.deepEqual(member?.process, identity);
-});
-
-test("pod unbind clears the process identity and is token-checked", () => {
-  isolatedState();
-  const { tokens } = twoPods();
-  json(runCli(["pod", "bind", "--member", "wT:p2", "--token", tokens.get("wT:p2")!, "--identity-pid", String(liveIdentity().pid), "--identity-started-at", liveIdentity().startedAt]));
-
-  const forged = runCli(["pod", "unbind", "--member", "wT:p2", "--token", "forged-token"]);
-  assert.equal(forged.exitCode, 1);
-  assert.match(forged.stderr, /does not authenticate/);
-
-  const unbound = json(runCli(["pod", "unbind", "--member", "wT:p2", "--token", tokens.get("wT:p2")!]));
-  assert.equal(unbound.ok, true);
-  const member = readCoordinationState().podMembers.find((candidate) => candidate.member === "wT:p2");
-  assert.equal(member?.process, null);
-});
-
 test("rebind follows a legitimate restart: the dead identity is replaced by the caller's own pid (MF-A)", () => {
   isolatedState();
   const { tokens } = twoPods();
   bindMember(tokens, "wT:p1", deadIdentity());
 
-  // No --pid flag exists: the rebind binds the calling process's own identity,
-  // captured engine-side, so a stolen token cannot pin a foreign process.
+  // The rebind binds the calling process's own identity, captured engine-side.
   const rebound = json(runCli(["pod", "rebind", "--member", "wT:p1", "--token", tokens.get("wT:p1")!]));
   assert.equal(rebound.ok, true);
   const member = readCoordinationState().podMembers.find((candidate) => candidate.member === "wT:p1");
@@ -357,9 +322,11 @@ test("rebind refuses while the recorded identity is still alive and names no oth
   assert.equal(alive.exitCode, 1);
   assert.match(alive.stderr, /still alive/);
 
-  // There is no flag to name another process: the rebind surface has no --pid.
-  const named = runCli(["pod", "rebind", "--member", "wT:p1", "--token", tokens.get("wT:p1")!, "--pid", "1"]);
-  assert.equal(named.exitCode, 1);
+  // A foreign pid (pid 1) is rejected by the caller-or-ancestor guard (il-8o3);
+  // there is no way to pin a member to an unrelated process under its token.
+  const foreign = runCli(["pod", "rebind", "--member", "wT:p1", "--token", tokens.get("wT:p1")!, "--pid", "1"]);
+  assert.equal(foreign.exitCode, 1);
+  assert.match(foreign.stderr, /not the calling process or an ancestor/);
 });
 
 test("leader done emits leader-done, keeps role and token, and fires no promotion (AE3, R14)", () => {
@@ -421,9 +388,162 @@ test("pod show lists live process bindings for the operator", () => {
   isolatedState();
   const { tokens } = twoPods();
   const identity = liveIdentity();
-  json(runCli(["pod", "bind", "--member", "wT:p2", "--token", tokens.get("wT:p2")!, "--identity-pid", String(identity.pid), "--identity-started-at", identity.startedAt]));
+  // Rebind the unbound worker to the calling (test) process's own identity.
+  json(runCli(["pod", "rebind", "--member", "wT:p2", "--token", tokens.get("wT:p2")!]));
 
   const shown = json(runCli(["pod", "show", "--pod", "eng", "--json"]));
   const bound = shown.members.find((member: any) => member.member === "wT:p2");
-  assert.deepEqual(bound.process, identity);
+  assert.deepEqual(bound.process, liveIdentity());
+});
+
+// --- QA il-562 must-fix regressions (pods-succession-codex.md) ---
+
+// MF-1: a successor with no token hash must not be promoted; the pod fails
+// closed and keeps the old leader's token so the roster still authenticates.
+test("promotion refuses a successor with no token hash and keeps the old leader's token (QA MF-1)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  bindMember(tokens, "wT:p1", deadIdentity());
+  bindMember(tokens, "wT:p2", liveIdentity());
+
+  // Simulate a torn/tampered state: the successor's token hash is gone.
+  const torn = readCoordinationState();
+  delete torn.memberTokens["wT:p2"];
+  writeCoordinationState(torn);
+
+  const trigger = send(tokens, "wT:p3", "wT:p1", "trigger evaluation");
+  assert.equal(trigger.exitCode, 0, trigger.stderr);
+
+  const state = readCoordinationState();
+  // No promotion: the successor cannot authenticate, so it must not lead.
+  assert.equal(podLeader("eng"), "wT:p1");
+  // Fail closed: the old leader's token is NOT deleted without a successor.
+  assert.notEqual(state.memberTokens["wT:p1"], undefined);
+  // Death is still recorded exactly once.
+  assert.equal(state.awarenessEvents.filter((event) => event.kind === "leader-death-verified").length, 1);
+  assert.equal(state.awarenessEvents.some((event) => event.kind === "leader-promoted"), false);
+});
+
+// MF-1 (post-trigger auth path): after a legitimate promotion the new leader
+// authenticates and routes; a successor that lost its hash is never promoted.
+test("a promoted successor authenticates on the post-trigger path (QA MF-1)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  bindMember(tokens, "wT:p1", deadIdentity());
+  bindMember(tokens, "wT:p2", liveIdentity());
+
+  json(send(tokens, "wT:p3", "wT:p2", "trigger"));
+  assert.equal(podLeader("eng"), "wT:p2");
+
+  // The promoted leader's own token still authenticates and routes.
+  const asLeader = send(tokens, "wT:p2", "wT:p3", "post-promotion");
+  assert.equal(asLeader.exitCode, 0, asLeader.stderr);
+  // The old leader's token is gone.
+  const stale = runCli(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p2", "--token", tokens.get("wT:p1")!, "--text", "x"]);
+  assert.equal(stale.exitCode, 1);
+  assert.match(stale.stderr, /not registered/);
+});
+
+// MF-2: no CLI surface accepts an arbitrary live pid under a member token.
+test("pod rebind rejects a foreign pid and there is no arbitrary bind surface (QA MF-2)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  bindMember(tokens, "wT:p1", deadIdentity());
+
+  // A foreign pid (the init process) is rejected by the caller/ancestor guard.
+  const foreign = runCli(["pod", "rebind", "--member", "wT:p1", "--token", tokens.get("wT:p1")!, "--pid", "1"]);
+  assert.equal(foreign.exitCode, 1);
+  assert.match(foreign.stderr, /not the calling process or an ancestor/);
+
+  // The old arbitrary-pid bind surface is gone entirely.
+  const bind = runCli(["pod", "bind", "--member", "wT:p1", "--token", tokens.get("wT:p1")!, "--identity-pid", "1", "--identity-started-at", "ps:x"]);
+  assert.equal(bind.exitCode, 1);
+  assert.match(bind.stderr, /pod requires/);
+
+  const member = readCoordinationState().podMembers.find((candidate) => candidate.member === "wT:p1");
+  assert.notEqual(member?.process?.pid, 1, "the foreign bind must not change the recorded identity");
+});
+
+// MF-3a: repeated leader-done is idempotent.
+test("repeated leader done emits leader-done exactly once (QA MF-3)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  bindMember(tokens, "wT:p1", liveIdentity());
+
+  json(runCli(["session", "set", "--pane", "wT:p1", "--token", tokens.get("wT:p1")!, "--state", "done"]));
+  json(runCli(["session", "set", "--pane", "wT:p1", "--token", tokens.get("wT:p1")!, "--state", "done"]));
+  json(runCli(["session", "set", "--pane", "wT:p1", "--token", tokens.get("wT:p1")!, "--state", "done"]));
+
+  const events = readCoordinationState().awarenessEvents.filter((event) => event.kind === "leader-done");
+  assert.equal(events.length, 1);
+});
+
+// MF-3b: repeated watch sweeps with a dead leader and no eligible successor
+// emit leader-death-verified exactly once.
+test("a dead leader with no eligible successor emits leader-death-verified exactly once across sweeps (QA MF-3)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  bindMember(tokens, "wT:p1", deadIdentity());
+  // Successors unbound: no eligible successor exists.
+
+  json(runCli(["watch", "--once"]));
+  json(runCli(["watch", "--once"]));
+  json(runCli(["watch", "--once"]));
+
+  const events = readCoordinationState().awarenessEvents.filter((event) => event.kind === "leader-death-verified");
+  assert.equal(events.length, 1);
+});
+
+// MF-4: a done leader cannot send to the orchestrator or mutate tasks.
+test("a done leader cannot reach the orchestrator or mutate tasks (QA MF-4)", () => {
+  isolatedState();
+  const { orchestrator, tokens } = twoPods();
+  bindMember(tokens, "wT:p1", liveIdentity());
+
+  // Pre-done, the leader can report to the orchestrator.
+  json(send(tokens, "wT:p1", "orchestrator", "before done"));
+
+  json(runCli(["session", "set", "--pane", "wT:p1", "--token", tokens.get("wT:p1")!, "--state", "done"]));
+
+  // Post-done, the same token no longer reaches the orchestrator.
+  const report = send(tokens, "wT:p1", "orchestrator", "after done");
+  assert.equal(report.exitCode, 1);
+  assert.match(report.stderr, /reported done/);
+
+  // Post-done, the same token cannot mutate tasks.
+  const add = runCli(["task", "add", "--id", "T1", "--title", "t", "--value", "v", "--pane", "wT:p1", "--token", tokens.get("wT:p1")!]);
+  assert.equal(add.exitCode, 1);
+  assert.match(add.stderr, /reported done/);
+  const stage = runCli(["task", "add", "--id", "T2", "--title", "t", "--value", "v", "--pane", "wT:p1", "--token", tokens.get("wT:p1")!]);
+  assert.equal(stage.exitCode, 1);
+
+  // Intra-pod reach survives while the pod waits for the orchestrator.
+  const intra = send(tokens, "wT:p1", "wT:p2", "handoff notes");
+  assert.equal(intra.exitCode, 0, intra.stderr);
+  assert.equal(orchestrator !== "", true);
+});
+
+// MF-5: corrupt succession arrays fail closed at load.
+test("state load refuses an empty, duplicate, foreign, or missing-leader succession (QA MF-5)", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  assert.equal(tokens.size > 0, true);
+  const healthy = readFileSync(coordinationStatePath(), "utf8");
+  const corrupt = (mutate: (pod: any, raw: any) => void, pattern: RegExp) => {
+    writeFileSync(coordinationStatePath(), healthy);
+    const raw = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+    mutate(raw.pods.find((p: any) => p.name === "eng"), raw);
+    writeFileSync(coordinationStatePath(), JSON.stringify(raw));
+    assert.throws(() => readCoordinationState(), pattern);
+  };
+
+  corrupt((pod) => { pod.succession = []; }, /succession is empty/);
+  corrupt((pod) => { pod.succession = ["wT:p1", "wT:p1", "wT:p2"]; }, /repeats member wT:p1/);
+  corrupt((pod) => { pod.succession = ["wT:p1", "wQ:p1"]; }, /not in the pod roster|belongs to pod ops/);
+  corrupt((pod) => { pod.succession = ["wT:p1", "wT:p9"]; }, /not in the pod roster/);
+  corrupt((pod) => { pod.leader = "wT:p9"; }, /leader wT:p9 is not in the pod roster/);
+
+  // A healthy file still loads after the corrupt probes are removed.
+  writeFileSync(coordinationStatePath(), healthy);
+  assert.doesNotThrow(() => readCoordinationState());
 });

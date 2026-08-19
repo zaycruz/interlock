@@ -78,8 +78,8 @@ test("version-2 state round-trips pods, members, channels, awareness events, and
   state.memberTokens["wT:p1"] = hash("token-wt-p1-secret");
   state.pods.push({ name: "eng", createdAt: NOW, leader: "wT:p1", succession: ["wT:p1", "wT:p2"], status: "open", closedAt: null });
   state.podMembers.push(
-    { member: "wT:p1", pod: "eng", role: "leader", process: { pid: 123, startedAt: "linux:456" }, registeredAt: NOW },
-    { member: "wT:p2", pod: "eng", role: "worker", process: null, registeredAt: NOW },
+    { member: "wT:p1", pod: "eng", role: "leader", process: { pid: 123, startedAt: "linux:456" }, registeredAt: NOW, diedAt: null, doneAt: null },
+    { member: "wT:p2", pod: "eng", role: "worker", process: null, registeredAt: NOW, diedAt: null, doneAt: null },
   );
   state.leaderChannels.push({ id: 1, fromPod: "eng", toPod: "ops", topic: "release coordination", openedAt: NOW, closedAt: null, messageCount: 3 });
   state.awarenessEvents.push({ id: 1, kind: "pod-created", createdAt: NOW, pod: "eng", members: ["wT:p1", "wT:p2"] });

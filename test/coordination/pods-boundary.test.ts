@@ -351,11 +351,11 @@ function channelState(): CoordinationState {
     { name: "old", createdAt: NOW, leader: "wX:p1", succession: ["wX:p1"], status: "closed", closedAt: NOW },
   );
   state.podMembers.push(
-    { member: "wT:p1", pod: "eng", role: "leader", process: null, registeredAt: NOW },
-    { member: "wT:p2", pod: "eng", role: "worker", process: null, registeredAt: NOW },
-    { member: "wQ:p1", pod: "ops", role: "leader", process: null, registeredAt: NOW },
-    { member: "wQ:p2", pod: "ops", role: "worker", process: null, registeredAt: NOW },
-    { member: "wX:p1", pod: "old", role: "leader", process: null, registeredAt: NOW },
+    { member: "wT:p1", pod: "eng", role: "leader", process: null, registeredAt: NOW, diedAt: null, doneAt: null },
+    { member: "wT:p2", pod: "eng", role: "worker", process: null, registeredAt: NOW, diedAt: null, doneAt: null },
+    { member: "wQ:p1", pod: "ops", role: "leader", process: null, registeredAt: NOW, diedAt: null, doneAt: null },
+    { member: "wQ:p2", pod: "ops", role: "worker", process: null, registeredAt: NOW, diedAt: null, doneAt: null },
+    { member: "wX:p1", pod: "old", role: "leader", process: null, registeredAt: NOW, diedAt: null, doneAt: null },
   );
   state.leaderChannels.push(
     { id: 1, fromPod: "eng", toPod: "ops", topic: "release", openedAt: NOW, closedAt: null, messageCount: 0 },
