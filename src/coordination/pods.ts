@@ -46,6 +46,14 @@ export const CHANNEL_TOPIC_MAX_LENGTH = 140;
 // remains well-defined for every event still present.
 export const AWARENESS_FEED_MAX_EVENTS = 1000;
 
+// ADR 0003 OQ3: scale limits. A deployment is one orchestrator and its pods
+// in one state file; these named bounds keep that file, the awareness feed,
+// and the routing tables small enough for the file-backed store. Refusals
+// name the limit so an operator hitting one can see the ceiling, not a
+// mystery failure.
+export const MAX_PODS_PER_DEPLOYMENT = 64;
+export const MAX_ROSTER_SIZE = 16;
+
 // QA il-026 MF-1: C0 control characters (in particular CR, LF, and ESC) are
 // rejected outright: the awareness feed renders topics into line-oriented
 // text, so a newline in a topic could forge apparent feed records and terminal
@@ -92,6 +100,15 @@ export function createPod(state: CoordinationState, name: string, template: PodT
   const podName = validateCoordinationName(name, "pod name");
   if (state.pods.some((pod) => pod.name === podName)) {
     throw new Error("pod name " + podName + " is already used; pod names are never reused, including closed pods");
+  }
+  // OQ3: closed pods count toward the limit too — their rosters stay
+  // persisted as history and their names are never reusable, so they consume
+  // the same state-file budget as open pods.
+  if (state.pods.length >= MAX_PODS_PER_DEPLOYMENT) {
+    throw new Error("deployment already has the maximum of " + MAX_PODS_PER_DEPLOYMENT + " pods; close history cannot be deleted, so no new pod can be created");
+  }
+  if (template.members.length > MAX_ROSTER_SIZE) {
+    throw new Error("pod roster of " + template.members.length + " members exceeds the maximum of " + MAX_ROSTER_SIZE + "; split the work across more pods");
   }
   // Provision every member engine-side: a 256-bit random token, only its hash
   // stored. A roster name already present in memberTokens with a different

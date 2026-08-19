@@ -414,8 +414,12 @@ hole, shipped).
   out first. The `compact` command keeps its message/digest sweep; the
   awareness cap is a write-time bound, so no operator action is ever required
   to stay within it.
-- Maximum pods and roster sizes (plan OQ3): unenforced in v0.0.1; state-file
-  scaling is the practical ceiling.
+- Maximum pods and roster sizes (plan OQ3, resolved): enforced at pod create
+  time as named constants — `MAX_PODS_PER_DEPLOYMENT` (64) and
+  `MAX_ROSTER_SIZE` (16) — with refusal errors that name the limit. Closed
+  pods count toward the deployment limit because their rosters persist as
+  history and their names are never reusable; an over-limit attempt leaves no
+  partial state behind.
 - BB IDE plugin surface (plan OQ1): adapter boundary only; no engine impact.
 
 ## References
