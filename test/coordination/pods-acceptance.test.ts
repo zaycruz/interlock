@@ -336,15 +336,11 @@ test("awareness reconstruction: the feed rebuilds the deployment timeline withou
 });
 
 // ---------------------------------------------------------------------------
-// PRODUCT BUG (reported, not coded around): a done leader can still open a new
-// leader channel. ADR 0003 D6 states "a leader that has reported done cannot
-// open new channels"; openLeaderChannel (src/coordination/pods.ts) has no
-// doneAt check. The intended contract is documented here as a skipped
-// acceptance case so the merged behavior keeps this suite green while the gap
-// is tracked. Unskip it when slice 3/4 code is fixed.
+// D6 post-done authority at the channel boundary (fixed in the D6 authority
+// gap commit): a done leader cannot open a new leader channel.
 // ---------------------------------------------------------------------------
 
-test("contract: a done leader cannot open a new leader channel (D6)", { skip: "merged behavior violates D6: done leader can open a channel; see summary" }, () => {
+test("contract: a done leader cannot open a new leader channel (D6)", () => {
   isolatedState();
   const { tokens } = twoPods();
   bindMember("wT:p1", liveIdentity());
