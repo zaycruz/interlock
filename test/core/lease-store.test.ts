@@ -275,6 +275,34 @@ test("fails closed on malformed contract fields and non-normalized path collisio
   pathLeases.close();
 });
 
+test("il-w0t: single-contract hot paths validate only the rows they touch", () => {
+  const repo = repository(); const leases = store(repo.path);
+  confirmed(leases, "healthy-1", owner, ["src/healthy.ts"]);
+  confirmed(leases, "corrupt-2", otherOwner, ["src/other.ts"]);
+  const database = new Database(leases.databasePath); database.pragma("ignore_check_constraints = ON");
+  database.prepare("UPDATE work_contracts SET process_id = 0 WHERE work_contract_id = 'corrupt-2'").run(); database.close();
+
+  // The healthy contract's heartbeat, release, and read paths no longer scan
+  // — and no longer trip over — the unrelated corrupt contract.
+  const renewed = leases.heartbeat({ workContractId: "healthy-1", owner });
+  assert.equal(renewed.workContractId, "healthy-1");
+  assert.equal(renewed.heartbeatAt, 100);
+  leases.release({ workContractId: "healthy-1", owner });
+
+  // The corrupt contract itself still fails closed on every path, including
+  // the hot ones.
+  assert.throws(() => leases.heartbeat({ workContractId: "corrupt-2", owner: otherOwner }), /identity is invalid/);
+  assert.throws(() => leases.release({ workContractId: "corrupt-2", owner: otherOwner }), /identity is invalid/);
+
+  // Whole-database and read-any operations keep the full sweep and still
+  // fail closed on the corrupt contract.
+  assert.throws(() => leases.listWorkContracts(), /identity is invalid/);
+  assert.throws(() => leases.reconcileStaleSessions(), /identity is invalid/);
+  assert.throws(() => leases.acquire({ workContractId: "contract-3", owner, paths: ["src/third.ts"] }), /identity is invalid/);
+  assert.throws(() => leases.getWorkContract("corrupt-2"), /identity is invalid/);
+  leases.close();
+});
+
 test("fails closed on corrupt persisted events", () => {
   const repo = repository(); const leases = store(repo.path);
   const db = new Database(leases.databasePath); db.pragma("ignore_check_constraints = ON");
