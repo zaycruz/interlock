@@ -25,6 +25,33 @@ export interface ClosedPod {
   closedChannels: LeaderChannel[];
 }
 
+export interface OpenedChannel {
+  channel: LeaderChannel;
+}
+
+export interface ClosedChannel {
+  channel: LeaderChannel;
+}
+
+// ADR 0003 D4: every channel carries a declared topic at open time (R8, AE6),
+// bounded so the awareness feed stays a scannable index.
+export const CHANNEL_TOPIC_MAX_LENGTH = 140;
+
+// QA il-026 MF-1: C0 control characters (in particular CR, LF, and ESC) are
+// rejected outright: the awareness feed renders topics into line-oriented
+// text, so a newline in a topic could forge apparent feed records and terminal
+// controls could alter rendering. The plain renderer also sanitizes topics
+// defensively so a pre-fix persisted value cannot forge lines either.
+const C0_CONTROL = /[\u0000-\u001F]/;
+
+export function validateChannelTopic(value: string): string {
+  const topic = typeof value === "string" ? value.trim() : "";
+  if (topic === "") throw new Error("channel topic is required at open time and must not be blank (ADR 0003 D4)");
+  if (C0_CONTROL.test(topic)) throw new Error("channel topic must not contain control characters (CR, LF, ESC, or other C0 controls)");
+  if (topic.length > CHANNEL_TOPIC_MAX_LENGTH) throw new Error(`channel topic must be at most ${CHANNEL_TOPIC_MAX_LENGTH} characters, got ${topic.length}`);
+  return topic;
+}
+
 export function parsePodTemplate(value: unknown): PodTemplate {
   if (!isRecord(value)) throw new Error("pod template must be a JSON object with members, leader, and succession");
   const members = nameList(value.members, "roster");
@@ -172,6 +199,66 @@ export function appendAwarenessEvent(state: CoordinationState, kind: AwarenessEv
   const event: AwarenessEvent = { id: state.nextAwarenessEventId++, kind, createdAt: new Date().toISOString(), ...fields };
   state.awarenessEvents.push(event);
   return event;
+}
+
+// ADR 0003 D4/D5: leader-to-leader channels. The caller authenticates the
+// member token inside withCoordinationLock before invoking this; here we
+// prove the caller is the leader of the opening pod. Both endpoints must be
+// open pods; the topic is mandatory and bounded. One open channel per pod
+// pair: a second open is rejected while the first is live.
+export function openLeaderChannel(state: CoordinationState, member: string, podName: string, toPodName: string, topic: string): OpenedChannel {
+  const declaredTopic = validateChannelTopic(topic);
+  if (podName === toPodName) throw new Error("leader channel endpoints must be two different pods");
+  const from = leaderMembership(state, member, podName);
+  const toPod = state.pods.find((candidate) => candidate.name === toPodName);
+  if (toPod === undefined) throw new Error("unknown pod " + toPodName);
+  if (from.pod.status === "closed") throw new Error("pod " + podName + " is closed; no new channels");
+  if (toPod.status === "closed") throw new Error("pod " + toPodName + " is closed; no new channels");
+  const existing = state.leaderChannels.find((channel) =>
+    channel.closedAt === null &&
+    ((channel.fromPod === podName && channel.toPod === toPodName) || (channel.fromPod === toPodName && channel.toPod === podName)));
+  if (existing !== undefined) {
+    throw new Error(`a leader channel between pods ${podName} and ${toPodName} is already open (channel ${existing.id})`);
+  }
+  const channel: LeaderChannel = {
+    id: state.nextChannelId++,
+    fromPod: podName,
+    toPod: toPodName,
+    topic: declaredTopic,
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+    messageCount: 0,
+  };
+  state.leaderChannels.push(channel);
+  appendAwarenessEvent(state, "channel-opened", { fromPod: channel.fromPod, toPod: channel.toPod, topic: channel.topic });
+  return { channel };
+}
+
+// Either endpoint's leader may close a channel; workers and outsiders cannot.
+// The awareness event records the final message count (R11).
+export function closeLeaderChannel(state: CoordinationState, member: string, channelId: number): ClosedChannel {
+  const channel = state.leaderChannels.find((candidate) => candidate.id === channelId);
+  if (channel === undefined) throw new Error("unknown leader channel " + channelId);
+  const membership = membershipOf(state, member);
+  const isEndpointLeader = membership !== undefined &&
+    membership.member.role === "leader" &&
+    membership.pod.status === "open" &&
+    (membership.pod.name === channel.fromPod || membership.pod.name === channel.toPod);
+  if (!isEndpointLeader) {
+    throw new Error("leader channel " + channelId + " can only be closed by a leader of pod " + channel.fromPod + " or pod " + channel.toPod);
+  }
+  if (channel.closedAt !== null) throw new Error("leader channel " + channelId + " is already closed");
+  channel.closedAt = new Date().toISOString();
+  appendAwarenessEvent(state, "channel-closed", { fromPod: channel.fromPod, toPod: channel.toPod, topic: channel.topic, messageCount: channel.messageCount });
+  return { channel };
+}
+
+function leaderMembership(state: CoordinationState, member: string, podName: string): { pod: Pod; member: PodMember } {
+  const entry = membershipOf(state, member);
+  if (entry === undefined || entry.pod.name !== podName || entry.member.role !== "leader") {
+    throw new Error("member " + member + " is not the leader of pod " + podName + "; only a pod leader opens and closes channels");
+  }
+  return entry;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

@@ -1,6 +1,6 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
-import { closePod, createPod, evaluatePreSend, parsePodTemplate } from "./pods.js";
+import { closeLeaderChannel, closePod, createPod, evaluatePreSend, openLeaderChannel, parsePodTemplate } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
@@ -29,7 +29,7 @@ export function coordinationUsage(): string[] {
     "  interlock task progress <id> --pane <pane> --token <token>",
     "  interlock task stage <id> <open|claimed|in-progress|blocked|done|closed> --pane <pane> --token <token>",
     "  interlock task reap <id> --pane <operator-pane> --token <token> --dead-claimer <pane>  (claimer session must be done)",
-    "  interlock send --from-pane <pane> --to-pane <pane> --token <token> --text <text> [--workspace <ws>] [--reply <message-id>]",
+    "  interlock send --from-pane <pane> --to-pane <pane> --token <token> --text <text> [--workspace <ws>] [--reply <message-id>] [--channel <channel-id>]",
     "  interlock inbox --pane <pane> --token <token> [--all] [--json]",
     "  interlock session set --pane <pane> --token <token> --state <idle|busy|done>",
     "  interlock watch --once",
@@ -41,6 +41,10 @@ export function coordinationUsage(): string[] {
     "  interlock pod close --pod <pod> --orchestrator-token <token>",
     "  interlock pod list [--json]",
     "  interlock pod show --pod <pod> [--json]",
+    "  interlock pod channel open --pod <pod> --to-pod <pod> --member <leader> --token <token> --topic <topic>  (topic required, max 140 chars)",
+    "  interlock pod channel close --channel <id> --member <leader> --token <token>",
+    "  interlock pod channel list [--pod <pod>] [--json]",
+    "  interlock pod awareness [--pod <pod>] [--json]  (metadata-only feed; never message content)",
   ];
 }
 
@@ -61,6 +65,8 @@ function execute(argv: string[]): string {
 
 function podCommand(argv: string[]): string {
   const subcommand = argv[0];
+  if (subcommand === "channel") return channelCommand(argv.slice(1));
+  if (subcommand === "awareness") return awarenessCommand(argv.slice(1));
   const parsed = parseArgs(argv.slice(1));
   if (subcommand === "create") {
     const name = required(parsed, "name");
@@ -99,6 +105,69 @@ function podCommand(argv: string[]): string {
     return lines.join("\n");
   }
   throw new Error("pod requires create, close, list, or show");
+}
+
+function channelCommand(argv: string[]): string {
+  const subcommand = argv[0];
+  const parsed = parseArgs(argv.slice(1));
+  if (subcommand === "open") {
+    const pod = required(parsed, "pod");
+    const toPod = required(parsed, "to-pod");
+    const member = required(parsed, "member");
+    const token = requiredToken(parsed);
+    const topic = required(parsed, "topic");
+    const opened = withCoordinationLock((state) => {
+      assertMemberToken(state, member, token);
+      return openLeaderChannel(state, member, pod, toPod, topic);
+    });
+    return JSON.stringify({ ok: true, ...opened });
+  }
+  if (subcommand === "close") {
+    const channelId = optionalNumber(parsed, "channel");
+    if (channelId === undefined) throw new Error("--channel is required");
+    const member = required(parsed, "member");
+    const token = requiredToken(parsed);
+    const closed = withCoordinationLock((state) => {
+      assertMemberToken(state, member, token);
+      return closeLeaderChannel(state, member, channelId);
+    });
+    return JSON.stringify({ ok: true, ...closed });
+  }
+  // Read-only view, same posture as the dashboard: no token, no mutation.
+  if (subcommand === "list") {
+    const state = readCoordinationState();
+    const pod = optional(parsed, "pod");
+    const channels = pod === null
+      ? state.leaderChannels
+      : state.leaderChannels.filter((channel) => channel.fromPod === pod || channel.toPod === pod);
+    if (has(parsed, "json")) return JSON.stringify({ ok: true, channels });
+    return channels.map((channel) => `#${channel.id} | ${channel.fromPod} <-> ${channel.toPod} | ${channel.closedAt === null ? "open" : "closed"} | messages ${channel.messageCount} | ${channel.topic}`).join("\n") || "(no channels)";
+  }
+  throw new Error("pod channel requires open, close, or list");
+}
+
+// ADR 0003 D5: the awareness feed is metadata-only — who talked to whom and
+// about what, never message content. Read-only, same posture as the dashboard.
+// QA il-026 MF-1 defense in depth: even a pre-fix persisted topic containing
+// control characters must render on one line; C0 controls and DEL are replaced.
+function sanitizeFeedText(value: string): string {
+  return value.replace(/[\u0000-\u001F\u007F]/g, "?");
+}
+
+function awarenessCommand(argv: string[]): string {
+  const parsed = parseArgs(argv);
+  const state = readCoordinationState();
+  const pod = optional(parsed, "pod");
+  const events = pod === null
+    ? state.awarenessEvents
+    : state.awarenessEvents.filter((event) => event.pod === pod || event.fromPod === pod || event.toPod === pod);
+  if (has(parsed, "json")) return JSON.stringify({ ok: true, events });
+  return events.map((event) => {
+    const parties = event.pod ?? `${event.fromPod ?? "?"} <-> ${event.toPod ?? "?"}`;
+    const detail = sanitizeFeedText(event.topic ?? event.member ?? "");
+    const count = event.messageCount === undefined ? "" : ` | messages ${event.messageCount}`;
+    return `#${event.id} | ${event.createdAt} | ${event.kind} | ${parties}${detail === "" ? "" : ` | ${detail}`}${count}`;
+  }).join("\n") || "(no awareness events)";
 }
 
 function readPodTemplate(path: string): ReturnType<typeof parsePodTemplate> {
@@ -220,15 +289,22 @@ function sendCommand(argv: string[]): string {
     if (replyTo !== undefined && parent === undefined) throw new Error(`unknown message #${replyTo}`);
     if (parent && parent.toPane !== fromPane) throw new Error("reply sender " + fromPane + " is not the addressed pane " + parent.toPane);
     const toPane = parent?.fromPane ?? validatePaneName(required(parsed, "to-pane"), "recipient pane");
+    const channelId = optionalNumber(parsed, "channel");
     // ADR 0003 D4: the routing boundary is enforced by mechanism, immediately
     // after token authentication and before any state mutation, through the
     // single pre-send evaluation seam (see evaluatePreSend in pods.ts).
-    evaluatePreSend(state, fromPane, toPane);
+    evaluatePreSend(state, fromPane, toPane, channelId);
     const id = state.nextMessageId++;
     const now = new Date().toISOString();
     const message: CoordinationMessage = { id, threadId: parent?.threadId ?? id, replyTo: replyTo ?? null, fromPane, toPane, workspace: optional(parsed, "workspace"), text: required(parsed, "text"), state: "queued", claimer: null, createdAt: now };
     if (parent && (parent.state === "queued" || parent.state === "claimed")) parent.state = "handled";
     state.messages.push(message);
+    // The send cleared the boundary: a channel send counts toward the channel's
+    // closing message count (R11). Intra-pod sends never carry a channel id.
+    if (channelId !== undefined) {
+      const channel = state.leaderChannels.find((candidate) => candidate.id === channelId)!;
+      channel.messageCount += 1;
+    }
     const digests = deliverDigests(state, "watcher-heartbeat");
     return { message, digests };
   });
