@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { AWARENESS_FEED_MAX_EVENTS } from "./pods.js";
 import type { AwarenessEvent, AwarenessEventKind, CoordinationMessage, CoordinationState, CoordinationTask, CoordinationSession, DigestDelivery, LeaderChannel, OrchestratorState, Pod, PodMember } from "./types.js";
 import { validateCoordinationName, validateMemberName, validateMemberToken, validatePaneName } from "./validation.js";
 import { assertSupportedPlatform } from "../core/platform.js";
@@ -208,13 +209,25 @@ export function migrateLegacyCoordinationState(legacyPod: string, legacyLeader: 
 
 export function writeDigestDelivery(state: CoordinationState, digest: Omit<DigestDelivery, "file">, messages: CoordinationMessage[]): DigestDelivery {
   validatePaneName(digest.pane);
-  const paneDir = join(coordinationDeliveryDir(), digest.pane);
-  mkdirSync(paneDir, { recursive: true });
-  const file = join(paneDir, `digest-${digest.id}.json`);
-  const delivery: DigestDelivery = { ...digest, file };
-  writeFileSync(file, JSON.stringify({ ...delivery, messages }, null, 2));
+  // il-yhw: exactly-once under partial failure. The persisted digest record
+  // is the durable marker that suppresses re-delivery; the delivery file is
+  // a re-materializable artifact of that record. Record the digest first,
+  // then write the file — a file-write failure leaves the digest persisted,
+  // so the next sweep skips it instead of duplicating it, and the inbox
+  // surfaces the missing file for redelivery instead of pretending it landed.
+  const delivery: DigestDelivery = { ...digest, file: join(coordinationDeliveryDir(), digest.pane, `digest-${digest.id}.json`) };
   state.digests.push(delivery);
+  writeDigestDeliveryFile(delivery, messages);
   return delivery;
+}
+
+// Re-materializes the delivery file for a persisted digest. Idempotent: the
+// filename is keyed by the digest id, so a rewrite after a partial failure
+// converges on the same content instead of duplicating.
+export function writeDigestDeliveryFile(delivery: DigestDelivery, messages: CoordinationMessage[]): void {
+  const paneDir = join(coordinationDeliveryDir(), delivery.pane);
+  mkdirSync(paneDir, { recursive: true });
+  writeFileSync(delivery.file, JSON.stringify({ ...delivery, messages }, null, 2));
 }
 
 function normalizeState(value: unknown): CoordinationState {
@@ -226,6 +239,14 @@ function normalizeState(value: unknown): CoordinationState {
   state.podMembers = podMembers(value.podMembers);
   state.leaderChannels = leaderChannels(value.leaderChannels);
   state.awarenessEvents = awarenessEvents(value.awarenessEvents);
+  // OQ2: a state file written before the retention cap can carry an oversized
+  // feed. Trim to the newest events at load, oldest first, so every
+  // subsequent mutation persists the bounded feed without operator action.
+  // The id counter below still floors against the retained suffix, so ids are
+  // never reused.
+  if (state.awarenessEvents.length > AWARENESS_FEED_MAX_EVENTS) {
+    state.awarenessEvents.splice(0, state.awarenessEvents.length - AWARENESS_FEED_MAX_EVENTS);
+  }
   state.orchestrator = orchestratorState(value.orchestrator);
   state.tasks = arrayOf<CoordinationTask>(value.tasks);
   state.messages = arrayOf<CoordinationMessage>(value.messages);
@@ -233,7 +254,7 @@ function normalizeState(value: unknown): CoordinationState {
   state.digests = arrayOf<DigestDelivery>(value.digests);
   state.lastWatchAt = typeof value.lastWatchAt === "string" ? value.lastWatchAt : null;
   state.nextMessageId = idCounter(value.nextMessageId, highestId(state.messages, "message"));
-  state.nextDigestId = idCounter(value.nextDigestId, highestId(state.digests, "digest"));
+  state.nextDigestId = idCounter(value.nextDigestId, Math.max(highestId(state.digests, "digest"), highestDeliveryDigestId()));
   state.nextChannelId = idCounter(value.nextChannelId, highestId(state.leaderChannels, "channel"));
   state.nextAwarenessEventId = idCounter(value.nextAwarenessEventId, highestId(state.awarenessEvents, "awareness event"));
   assertSuccessionIntegrity(state);
@@ -470,6 +491,36 @@ function highestId(items: ReadonlyArray<{ id: unknown }>, kind: string): number 
 function idCounter(value: unknown, highestExistingId: number): number {
   const floor = highestExistingId + 1;
   return Number.isSafeInteger(value) && (value as number) >= floor ? value as number : floor;
+}
+
+// il-yhw: a crash between a delivery-file write and the state commit leaves
+// an orphaned digest-N.json with no persisted digest record. The next-digest
+// counter must floor against those artifacts too, or the next sweep reuses N
+// and overwrites the orphan — a second logical delivery under one id. Files
+// that do not match the digest naming scheme are ignored.
+function highestDeliveryDigestId(): number {
+  let highest = 0;
+  let panes: string[];
+  try {
+    panes = readdirSync(coordinationDeliveryDir());
+  } catch (error) {
+    if (isMissingFile(error)) return 0;
+    throw error;
+  }
+  for (const pane of panes) {
+    let files: string[];
+    try {
+      files = readdirSync(join(coordinationDeliveryDir(), pane));
+    } catch (error) {
+      if (isMissingFile(error)) continue;
+      throw error;
+    }
+    for (const file of files) {
+      const match = /^digest-(\d+)\.json$/.exec(file);
+      if (match !== null) highest = Math.max(highest, Number(match[1]));
+    }
+  }
+  return highest;
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function isMissingFile(error: unknown): boolean { return isNodeError(error) && error.code === "ENOENT"; }

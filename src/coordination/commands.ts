@@ -1,9 +1,9 @@
-import { readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
-import { assertNotDoneLeader, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
+import { assertMessageStageTransition, assertNotDoneLeader, assertTaskStageTransition, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
-import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
-import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
+import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery, writeDigestDeliveryFile } from "./state.js";
+import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, MessageStage, SessionState, TaskStage } from "./types.js";
 import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
 import { sessionProcessIdentityFor } from "../core/process-identity.js";
 
@@ -32,6 +32,8 @@ export function coordinationUsage(): string[] {
     "  interlock task reap <id> --pane <operator-pane> --token <token> --dead-claimer <pane>  (claimer session must be done)",
     "  interlock send --from-pane <pane> --to-pane <pane> --token <token> --text <text> [--workspace <ws>] [--reply <message-id>] [--channel <channel-id>]",
     "  interlock inbox --pane <pane> --token <token> [--all] [--json]",
+    "  interlock inbox claim --message <id> --pane <pane> --token <token>",
+    "  interlock inbox close --message <id> --pane <pane> --token <token>",
     "  interlock session set --pane <pane> --token <token> --state <idle|busy|done>",
     "  interlock watch --once",
     "  interlock dashboard --once [--json]",
@@ -257,6 +259,10 @@ function taskCommand(argv: string[]): string {
       // so a live but quiet claimer would be wrongfully displaced. Reap requires
       // the claimer session to be verifiably finished (state done).
       if (session.state !== "done") throw new Error("dead claimer " + deadClaimer + " must be done before reap");
+      // il-2t8: reap returns live work to open through the same matrix as
+      // every other stage move — a done or closed task is terminal and is
+      // never resurrected, even for a finished claimer.
+      assertTaskStageTransition(id, candidate.stage, "open");
       candidate.claimer = null;
       candidate.stage = "open";
       candidate.blocker = null;
@@ -291,7 +297,15 @@ function taskCommand(argv: string[]): string {
     const result = withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
       assertNotDoneLeader(state, pane, "task stage");
-      const task = ownedTask(state, id, pane); task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
+      const task = ownedTask(state, id, pane);
+      // il-2t8: the owner drives the task along the transition matrix; jumps
+      // that reopen terminal work or manufacture claims are refused.
+      assertTaskStageTransition(id, task.stage, stage);
+      // A transition back to open is a release: the claim leaves with the
+      // stage, so the reopened task can actually be claimed again.
+      if (stage === "open") { task.claimer = null; task.blocker = null; }
+      if (stage === "blocked") task.blocker = "declared by " + pane;
+      task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
       const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
       return { task: { ...task }, digests };
     });
@@ -318,7 +332,12 @@ function sendCommand(argv: string[]): string {
     const id = state.nextMessageId++;
     const now = new Date().toISOString();
     const message: CoordinationMessage = { id, threadId: parent?.threadId ?? id, replyTo: replyTo ?? null, fromPane, toPane, workspace: optional(parsed, "workspace"), text: required(parsed, "text"), state: "queued", claimer: null, createdAt: now };
-    if (parent && (parent.state === "queued" || parent.state === "claimed")) parent.state = "handled";
+    if (parent && (parent.state === "queued" || parent.state === "claimed")) {
+      // A reply hands the thread back: the parent moves queued/claimed ->
+      // handled, which the message matrix already permits.
+      assertMessageStageTransition(parent.id, parent.state, "handled");
+      parent.state = "handled";
+    }
     state.messages.push(message);
     // The send cleared the boundary: a channel send counts toward the channel's
     // closing message count (R11). Intra-pod sends never carry a channel id.
@@ -335,13 +354,51 @@ function sendCommand(argv: string[]): string {
 }
 
 function inboxCommand(argv: string[]): string {
+  const subcommand = argv[0];
+  if (subcommand === "claim" || subcommand === "close") {
+    // il-2t8: claimed and closed were unreachable through the CLI. The
+    // addressed pane claims its own queued mail and closes out claimed or
+    // handled mail; the matrix forbids resurrecting terminal messages.
+    const target: MessageStage = subcommand === "claim" ? "claimed" : "closed";
+    const parsed = parseArgs(argv.slice(1));
+    const pane = validatePaneName(required(parsed, "pane"));
+    const token = requiredToken(parsed);
+    const id = optionalNumber(parsed, "message");
+    if (id === undefined) throw new Error("--message is required");
+    const result = withCoordinationLock((state) => {
+      assertMemberToken(state, pane, token);
+      const found = state.messages.find((candidate) => candidate.id === id);
+      if (found === undefined) throw new Error(`unknown message #${id}`);
+      if (found.toPane !== pane) throw new Error(`message #${id} is not addressed to ${pane}`);
+      assertMessageStageTransition(found.id, found.state, target);
+      found.state = target;
+      return { ...found };
+    });
+    return JSON.stringify({ ok: true, message: result });
+  }
   const parsed = parseArgs(argv);
-  const state = readCoordinationState();
   const pane = validatePaneName(required(parsed, "pane"));
-  assertMemberToken(state, pane, requiredToken(parsed));
-  const messages = state.messages.filter((message) => message.toPane === pane && (has(parsed, "all") || message.state === "queued" || message.state === "claimed"));
-  const digests = state.digests.filter((digest) => digest.pane === pane);
-  if (has(parsed, "json")) return JSON.stringify({ ok: true, pane, messages, digests });
+  const token = requiredToken(parsed);
+  const result = withCoordinationLock((state) => {
+    assertMemberToken(state, pane, token);
+    const messages = state.messages.filter((message) => message.toPane === pane && (has(parsed, "all") || message.state === "queued" || message.state === "claimed"));
+    const digests = state.digests.filter((digest) => digest.pane === pane);
+    // il-yhw: a digest whose delivery file was lost to a partial failure is
+    // still the durable record. Repair it inside the lock — the file is
+    // idempotently keyed by digest id, so rewriting converges instead of
+    // duplicating — and surface it as redelivered. Running under the lock is
+    // what keeps a concurrent send from being erased by a stale snapshot.
+    const repaired: number[] = [];
+    for (const digest of digests) {
+      if (existsSync(digest.file)) continue;
+      writeDigestDeliveryFile(digest, state.messages.filter((message) => digest.messageIds.includes(message.id)));
+      repaired.push(digest.id);
+    }
+    return { messages, digests, repaired };
+  });
+  const { messages, digests } = result;
+  const repaired = result.repaired;
+  if (has(parsed, "json")) return JSON.stringify({ ok: true, pane, messages, digests, redelivered: repaired });
   const lines = [`INBOX ${pane}`, ...messages.map((message) => `#${message.id} ${message.state} ${message.fromPane} -> ${message.toPane}: ${message.text}`), "DIGEST DELIVERIES", ...digests.map((digest) => `#${digest.id} ${digest.reason} messages=${digest.messageIds.map((id) => `#${id}`).join(",")} file=${digest.file}`)];
   return `${lines.join("\n")}\n`;
 }

@@ -198,7 +198,7 @@ export class SqliteLeaseStore implements LeaseStore {
   markRemoteAttempted(input: WorkContractOwnerInput): LeaseState {
     validateOwnerInput(input);
     return this.database.transaction(() => {
-      this.validatePersistedState();
+      this.validateContractRows(input.workContractId);
       const lease = this.ownedLease(input);
       if (lease.remoteConfirmed) throw new Error(`Work contract ${input.workContractId} is already remotely confirmed`);
       this.database.prepare("UPDATE work_contracts SET remote_attempted = 1 WHERE work_contract_id = ?").run(input.workContractId);
@@ -209,7 +209,7 @@ export class SqliteLeaseStore implements LeaseStore {
   confirmRemote(input: WorkContractOwnerInput): LeaseState {
     validateOwnerInput(input);
     return this.database.transaction(() => {
-      this.validatePersistedState();
+      this.validateContractRows(input.workContractId);
       const lease = this.ownedLease(input);
       if (!lease.remoteAttempted) throw new Error(`Work contract ${input.workContractId} has no recorded remote claim attempt`);
       this.database.prepare("UPDATE work_contracts SET remote_confirmed = 1 WHERE work_contract_id = ?").run(input.workContractId);
@@ -220,7 +220,7 @@ export class SqliteLeaseStore implements LeaseStore {
   heartbeat(input: WorkContractOwnerInput): LeaseState {
     validateOwnerInput(input);
     return this.database.transaction(() => {
-      this.validatePersistedState();
+      this.validateContractRows(input.workContractId);
       const lease = this.ownedConfirmedLease(input);
       if (lease.completing) throw new Error(`Work contract ${input.workContractId} is completing`);
       this.database.prepare("UPDATE work_contracts SET heartbeat_at = ? WHERE work_contract_id = ?").run(this.clock(), input.workContractId);
@@ -231,7 +231,7 @@ export class SqliteLeaseStore implements LeaseStore {
   release(input: WorkContractOwnerInput): LeaseState {
     validateOwnerInput(input);
     return this.database.transaction(() => {
-      this.validatePersistedState();
+      this.validateContractRows(input.workContractId);
       const lease = this.ownedLease(input);
       this.database.prepare("DELETE FROM work_contracts WHERE work_contract_id = ?").run(input.workContractId);
       return lease;
@@ -242,7 +242,7 @@ export class SqliteLeaseStore implements LeaseStore {
     validateOwnerInput(input);
     if (typeof input.reason !== "string" || input.reason.trim() === "") throw new TypeError("Recovery reason must be a non-empty string");
     return this.database.transaction(() => {
-      this.validatePersistedState();
+      this.validateContractRows(input.workContractId);
       const lease = this.ownedConfirmedLease(input);
       if (lease.completing) throw new Error(`Work contract ${input.workContractId} is completing`);
       const event = this.insertRecoveryEvent(lease, "explicit-release", input.reason);
@@ -254,7 +254,7 @@ export class SqliteLeaseStore implements LeaseStore {
   beginCompletion(input: WorkContractOwnerInput): CompletionEvent {
     validateOwnerInput(input);
     return this.database.transaction(() => {
-      this.validatePersistedState();
+      this.validateContractRows(input.workContractId);
       const lease = this.ownedConfirmedLease(input);
       if (lease.completing) throw new Error(`Work contract ${input.workContractId} is already completing`);
       this.database.prepare("UPDATE work_contracts SET completing = 1 WHERE work_contract_id = ?").run(input.workContractId);
@@ -356,6 +356,29 @@ export class SqliteLeaseStore implements LeaseStore {
   private validatePersistedState(): void {
     const contracts = this.database.prepare("SELECT * FROM work_contracts ORDER BY work_contract_id").all() as WorkContractRow[];
     const paths = this.database.prepare("SELECT path, work_contract_id FROM path_leases ORDER BY path").all() as PathLeaseRow[];
+    this.validateContractAndPathRows(contracts, paths);
+    this.recoveryRows();
+    this.completionRows();
+  }
+
+  // il-w0t: the full sweep above is retained for multi-contract operations
+  // (acquire collisions, reconciliation, lock hand-over), but single-contract
+  // hot paths — heartbeat, claim confirmation, completion — only ever touch
+  // one contract, so they validate exactly the rows they read: the contract,
+  // its own path leases, and the event tables' consistency as far as the
+  // operation depends on it. A corrupt *other* contract no longer blocks a
+  // healthy heartbeat, and the cost is O(rows touched), not O(database).
+  private validateContractRows(workContractId: string): void {
+    const contract = this.contractRow(workContractId);
+    if (contract === undefined) throw new WorkContractNotFoundError(workContractId);
+    this.validateContractAndPathRows([contract], this.pathRowsFor(workContractId));
+  }
+
+  private pathRowsFor(workContractId: string): PathLeaseRow[] {
+    return this.database.prepare("SELECT path, work_contract_id FROM path_leases WHERE work_contract_id = ? ORDER BY path").all(workContractId) as PathLeaseRow[];
+  }
+
+  private validateContractAndPathRows(contracts: WorkContractRow[], paths: PathLeaseRow[]): void {
     const contractIds = new Set<string>();
     const pathCounts = new Map<string, number>();
     for (const contract of contracts) {
@@ -373,8 +396,6 @@ export class SqliteLeaseStore implements LeaseStore {
         throw new Error(`Work contract ${contract.work_contract_id} has no persisted paths`);
       }
     }
-    this.recoveryRows();
-    this.completionRows();
   }
 
   private reconcileStaleSessionsInTransaction(): StaleSessionReconciliation {

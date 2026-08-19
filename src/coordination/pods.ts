@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import type { AwarenessEvent, AwarenessEventKind, CoordinationState, LeaderChannel, Pod, PodMember } from "./types.js";
+import type { AwarenessEvent, AwarenessEventKind, CoordinationState, LeaderChannel, MessageStage, Pod, PodMember, TaskStage } from "./types.js";
 import { ORCHESTRATOR_MEMBER, tokenHash } from "./state.js";
 import { validateCoordinationName } from "./validation.js";
 import { inspectProcess } from "../core/process-identity.js";
@@ -38,6 +38,63 @@ export interface ClosedChannel {
 // ADR 0003 D4: every channel carries a declared topic at open time (R8, AE6),
 // bounded so the awareness feed stays a scannable index.
 export const CHANNEL_TOPIC_MAX_LENGTH = 140;
+
+// ADR 0003 OQ2: the awareness feed is append-only, so writes cap it at the
+// most recent AWARENESS_FEED_MAX_EVENTS events. The id counter is never
+// lowered: a dropped event's id is never reused, and the retained suffix is
+// always a contiguous run of the highest ids, so reconstruction from the feed
+// remains well-defined for every event still present.
+export const AWARENESS_FEED_MAX_EVENTS = 1000;
+
+// ADR 0003 OQ3: scale limits. A deployment is one orchestrator and its pods
+// in one state file; these named bounds keep that file, the awareness feed,
+// and the routing tables small enough for the file-backed store. Refusals
+// name the limit so an operator hitting one can see the ceiling, not a
+// mystery failure.
+export const MAX_PODS_PER_DEPLOYMENT = 64;
+export const MAX_ROSTER_SIZE = 16;
+
+// il-2t8: stage transitions are a matrix, not a free-for-all. Tasks move
+// forward through the work lifecycle and may recycle forward stages (a fresh
+// look at in-progress work), but a task never reopens from done/closed and
+// never manufactures a claim out of in-progress/blocked. Messages follow the
+// same shape, with one extra rule: queued messages are still awaiting digest
+// delivery, and closing is digest-invisible, so a queued message must be
+// claimed (or answered, which marks it handled) before it can be closed —
+// otherwise mail could vanish without ever surfacing in a digest.
+const TASK_STAGE_TRANSITIONS: Record<TaskStage, ReadonlySet<TaskStage>> = {
+  // open -> closed is deliberately absent: task mutation is owner-only, and
+  // an open task has no owner, so the edge would be unreachable. Withdrawing
+  // unclaimed work is a task remove concern, not a stage transition.
+  open: new Set<TaskStage>(["claimed"]),
+  claimed: new Set<TaskStage>(["open", "in-progress", "blocked", "done", "closed"]),
+  "in-progress": new Set<TaskStage>(["open", "in-progress", "blocked", "done", "closed"]),
+  blocked: new Set<TaskStage>(["open", "in-progress", "done", "closed"]),
+  done: new Set<TaskStage>(["closed"]),
+  closed: new Set<TaskStage>(),
+};
+
+const MESSAGE_STAGE_TRANSITIONS: Record<MessageStage, ReadonlySet<MessageStage>> = {
+  queued: new Set<MessageStage>(["claimed", "handled"]),
+  claimed: new Set<MessageStage>(["claimed", "handled", "closed"]),
+  handled: new Set<MessageStage>(["closed"]),
+  closed: new Set<MessageStage>(),
+};
+
+function assertTransition<T extends string>(transitions: Record<T, ReadonlySet<T>>, kind: string, id: string, from: T, to: T): void {
+  if (from === to) return;
+  if (!transitions[from].has(to)) {
+    throw new Error(`${kind} ${id} cannot move from ${from} to ${to}`);
+  }
+}
+
+export function assertTaskStageTransition(id: string, from: TaskStage, to: TaskStage): void {
+  assertTransition(TASK_STAGE_TRANSITIONS, "task", id, from, to);
+}
+
+export function assertMessageStageTransition(id: number, from: MessageStage, to: MessageStage): void {
+  assertTransition(MESSAGE_STAGE_TRANSITIONS, "message", `#${id}`, from, to);
+}
 
 // QA il-026 MF-1: C0 control characters (in particular CR, LF, and ESC) are
 // rejected outright: the awareness feed renders topics into line-oriented
@@ -85,6 +142,15 @@ export function createPod(state: CoordinationState, name: string, template: PodT
   const podName = validateCoordinationName(name, "pod name");
   if (state.pods.some((pod) => pod.name === podName)) {
     throw new Error("pod name " + podName + " is already used; pod names are never reused, including closed pods");
+  }
+  // OQ3: closed pods count toward the limit too — their rosters stay
+  // persisted as history and their names are never reusable, so they consume
+  // the same state-file budget as open pods.
+  if (state.pods.length >= MAX_PODS_PER_DEPLOYMENT) {
+    throw new Error("deployment already has the maximum of " + MAX_PODS_PER_DEPLOYMENT + " pods; close history cannot be deleted, so no new pod can be created");
+  }
+  if (template.members.length > MAX_ROSTER_SIZE) {
+    throw new Error("pod roster of " + template.members.length + " members exceeds the maximum of " + MAX_ROSTER_SIZE + "; split the work across more pods");
   }
   // Provision every member engine-side: a 256-bit random token, only its hash
   // stored. A roster name already present in memberTokens with a different
@@ -318,6 +384,9 @@ function membershipOf(state: CoordinationState, member: string): { pod: Pod; mem
 export function appendAwarenessEvent(state: CoordinationState, kind: AwarenessEventKind, fields: Partial<Omit<AwarenessEvent, "id" | "kind" | "createdAt">>): AwarenessEvent {
   const event: AwarenessEvent = { id: state.nextAwarenessEventId++, kind, createdAt: new Date().toISOString(), ...fields };
   state.awarenessEvents.push(event);
+  if (state.awarenessEvents.length > AWARENESS_FEED_MAX_EVENTS) {
+    state.awarenessEvents.splice(0, state.awarenessEvents.length - AWARENESS_FEED_MAX_EVENTS);
+  }
   return event;
 }
 

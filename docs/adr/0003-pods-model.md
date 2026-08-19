@@ -405,12 +405,23 @@ hole, shipped).
 
 ## Open questions
 
-- Awareness feed retention and compaction (plan OQ2): this ADR makes it
-  append-only; unbounded growth is already follow-up item 7 for the plane,
-  and channel open/close churn can accelerate it (D5). Retention policy lands
-  with the compaction work, not here.
-- Maximum pods and roster sizes (plan OQ3): unenforced in v0.0.1; state-file
-  scaling is the practical ceiling.
+- Awareness feed retention and compaction (plan OQ2, resolved): the feed is
+  append-only but capped at the most recent 1000 events
+  (`AWARENESS_FEED_MAX_EVENTS`), enforced inside `appendAwarenessEvent` on
+  every write, so channel open/close churn (D5) can never grow the persisted
+  state file past the bound. The id counter is never lowered and the retained
+  events are always the highest-id contiguous suffix; the oldest events age
+  out first. A state file written before the cap can carry an oversized feed:
+  state load trims it to the newest 1000, so the next mutation — including
+  `compact` — persists the bounded feed with no operator action. The `compact`
+  command keeps its message/digest sweep; the awareness cap needs no sweep of
+  its own.
+- Maximum pods and roster sizes (plan OQ3, resolved): enforced at pod create
+  time as named constants — `MAX_PODS_PER_DEPLOYMENT` (64) and
+  `MAX_ROSTER_SIZE` (16) — with refusal errors that name the limit. Closed
+  pods count toward the deployment limit because their rosters persist as
+  history and their names are never reusable; an over-limit attempt leaves no
+  partial state behind.
 - BB IDE plugin surface (plan OQ1): adapter boundary only; no engine impact.
 
 ## References
