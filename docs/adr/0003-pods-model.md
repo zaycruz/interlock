@@ -411,9 +411,11 @@ hole, shipped).
   every write, so channel open/close churn (D5) can never grow the persisted
   state file past the bound. The id counter is never lowered and the retained
   events are always the highest-id contiguous suffix; the oldest events age
-  out first. The `compact` command keeps its message/digest sweep; the
-  awareness cap is a write-time bound, so no operator action is ever required
-  to stay within it.
+  out first. A state file written before the cap can carry an oversized feed:
+  state load trims it to the newest 1000, so the next mutation — including
+  `compact` — persists the bounded feed with no operator action. The `compact`
+  command keeps its message/digest sweep; the awareness cap needs no sweep of
+  its own.
 - Maximum pods and roster sizes (plan OQ3, resolved): enforced at pod create
   time as named constants — `MAX_PODS_PER_DEPLOYMENT` (64) and
   `MAX_ROSTER_SIZE` (16) — with refusal errors that name the limit. Closed

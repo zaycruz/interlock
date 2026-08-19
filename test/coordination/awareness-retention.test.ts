@@ -2,14 +2,14 @@
 // AWARENESS_FEED_MAX_EVENTS events, enforced on every event write so the
 // persisted state file can never outgrow the bound.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { runCli } from "../../src/cli/index.js";
 import { AWARENESS_FEED_MAX_EVENTS } from "../../src/coordination/index.js";
-import { readCoordinationState } from "../../src/coordination/state.js";
+import { coordinationStatePath, readCoordinationState } from "../../src/coordination/state.js";
 
 const stateDirs: string[] = [];
 const originalStateDir = process.env.INTERLOCK_STATE_DIR;
@@ -52,6 +52,22 @@ function closeChannel(tokens: Map<string, string>, id: number): void {
   json(runCli(["pod", "channel", "close", "--channel", String(id), "--member", "wT:p1", "--token", tokens.get("wT:p1")!]));
 }
 
+// Seeds an oversized pre-cap feed the way an upgrade from the unbounded
+// version would carry it: straight into the persisted state file.
+function seedOversizedFeed(count: number): void {
+  const state = JSON.parse(readFileSync(coordinationStatePath(), "utf8"));
+  state.awarenessEvents = Array.from({ length: count }, (_, index) => ({
+    id: index + 1,
+    kind: "channel-opened",
+    createdAt: new Date().toISOString(),
+    fromPod: "eng",
+    toPod: "ops",
+    topic: `legacy ${index + 1}`,
+  }));
+  state.nextAwarenessEventId = count + 1;
+  writeFileSync(coordinationStatePath(), JSON.stringify(state, null, 2));
+}
+
 test("awareness feed is capped at AWARENESS_FEED_MAX_EVENTS on write", () => {
   assert.equal(AWARENESS_FEED_MAX_EVENTS, 1000);
   isolatedState();
@@ -87,4 +103,41 @@ test("awareness feed under the cap keeps every event in append order", () => {
   const state = readCoordinationState();
   const kinds = state.awarenessEvents.map((event) => event.kind);
   assert.deepEqual(kinds, ["pod-created", "pod-created", "channel-opened", "channel-closed"]);
+});
+
+test("compact trims a pre-existing oversized awareness feed to the cap (OQ2 upgrade path)", () => {
+  isolatedState();
+  twoPods();
+  seedOversizedFeed(AWARENESS_FEED_MAX_EVENTS + 1);
+
+  // Before the fix, compact left the legacy feed untouched.
+  json(runCli(["compact"]));
+
+  const state = readCoordinationState();
+  assert.equal(state.awarenessEvents.length, AWARENESS_FEED_MAX_EVENTS);
+  const ids = state.awarenessEvents.map((event) => event.id);
+  assert.deepEqual(ids, Array.from({ length: AWARENESS_FEED_MAX_EVENTS }, (_, offset) => 2 + offset));
+  assert.equal(state.nextAwarenessEventId, AWARENESS_FEED_MAX_EVENTS + 2);
+
+  // The trimmed feed is the one the operator sees.
+  const feed = json(runCli(["pod", "awareness", "--json"]));
+  assert.equal(feed.events.length, AWARENESS_FEED_MAX_EVENTS);
+  assert.equal(feed.events[0].id, 2);
+});
+
+test("a compacted oversized feed keeps ids monotonic across the next append", () => {
+  isolatedState();
+  const { tokens } = twoPods();
+  seedOversizedFeed(AWARENESS_FEED_MAX_EVENTS + 5);
+  json(runCli(["compact"]));
+
+  // The next awareness-producing mutation appends above the trimmed suffix
+  // and trims again — no id is ever reused.
+  closeChannel(tokens, openChannel(tokens, "after upgrade"));
+  const state = readCoordinationState();
+  assert.equal(state.awarenessEvents.length, AWARENESS_FEED_MAX_EVENTS);
+  const last = state.awarenessEvents[state.awarenessEvents.length - 1]!;
+  assert.equal(last.kind, "channel-closed");
+  // Seeded counter was 1006; the open took it, the close took the next.
+  assert.equal(last.id, AWARENESS_FEED_MAX_EVENTS + 7);
 });
