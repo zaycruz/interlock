@@ -70,7 +70,7 @@ Ownership split:
 - Engine: `src/coordination/host-adapter.ts` — the interface and contract
   version only. No herdr identifiers. Repo `AGENTS.md` module rule stands:
   core/beads/cli/pi/coordination stay host-free.
-- Herdr plugin: separate package `@raava/interlock-plugin-herdr` (installed
+- Herdr plugin: separate package `@raava-solutions/interlock-plugin-herdr` (installed
   per ADR-0001). It contains the herdr adapter implementation and the moved
   `space-adapter.ts` transport.
 - BB IDE plugin (v0.0.2): separate package, same contract, no engine change

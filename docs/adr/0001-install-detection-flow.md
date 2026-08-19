@@ -8,7 +8,7 @@
 
 ## Context
 
-`@raava/interlock` becomes a public npm package. `npm install` must give the
+`@raava-solutions/interlock` becomes a public npm package. `npm install` must give the
 engine only. Herdr integration must be opt-in: a setup step detects herdr,
 explains what it will do, asks permission, and installs the herdr plugin only
 on yes. No npm lifecycle script may mutate another tool. The threat model
@@ -70,11 +70,11 @@ consent into herdr's configuration — herdr's files belong to herdr.
 Product ruling (head office, 2026-08-17, #562): install is automated on
 explicit yes, with the exact command echoed before it runs.
 
-The herdr plugin is a separate package, `@raava/interlock-plugin-herdr`,
+The herdr plugin is a separate package, `@raava-solutions/interlock-plugin-herdr`,
 versioned in lockstep with the engine (ADR-0002 covers the boundary). On
 consent, setup runs two steps, echoing each exact command before it runs:
 
-1. Package install: `npm install -g @raava/interlock-plugin-herdr`. Setup
+1. Package install: `npm install -g @raava-solutions/interlock-plugin-herdr`. Setup
    runs this itself after the explicit yes; echoing the command first keeps
    the supply-chain event visible in the user's own terminal. If the plugin
    package is already resolvable at the expected version, setup skips this
@@ -128,7 +128,7 @@ matching `npm uninstall -g` command.
   activation, accepted as documentation. A one-line "run `interlock setup`"
   message in the README and package description is enough; lifecycle output
   is frequently suppressed.
-- **Plugin bundled inside `@raava/interlock` as an inert module, activated by
+- **Plugin bundled inside `@raava-solutions/interlock` as an inert module, activated by
   a local file write.** Rejected for v0.0.1. It removes the second npm fetch
   but forces setup to write files into herdr's directory tree directly,
   which breaks the "herdr owns its config" rule and couples setup to herdr's

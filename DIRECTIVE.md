@@ -56,9 +56,9 @@ Interlock becomes a public product. This team owns that work end to end.
 
 ### Shape
 
-- Package name: @raava/interlock (DevOps is creating the npm org).
+- Package name: @raava-solutions/interlock (DevOps is creating the npm org).
 - License: MIT (head-office default; CEO may override).
-- Install flow: npm install @raava/interlock gives the engine. A setup step
+- Install flow: npm install @raava-solutions/interlock gives the engine. A setup step
   (interlock setup / doctor) detects herdr, explains what it will do, asks
   permission, and installs the herdr plugin only on yes. No npm postinstall
   mutations of other tools.
@@ -69,7 +69,12 @@ Interlock becomes a public product. This team owns that work end to end.
   API docs are pending from the CEO; design against the adapter boundary
   until they arrive.
 
-### The pods concept (v0.0.2 scope)
+### The pods concept
+
+Versioning note: the Product Contract
+(docs/plans/2026-08-17-001-feat-pods-model-plan.md, R18) owns release scope.
+Pods ship IN v0.0.1 with the boundary enforced. v0.0.2 is the BB IDE adapter
+only. This heading previously said v0.0.2 for pods — superseded.
 
 A pane is an identity. A pod is a focused effort: a named group of panes that
 contribute to one effort together, with one designated pod leader pane for
