@@ -1,9 +1,9 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
-import { assertNotDoneLeader, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
+import { assertMessageStageTransition, assertNotDoneLeader, assertTaskStageTransition, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
-import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
+import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, MessageStage, SessionState, TaskStage } from "./types.js";
 import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
 import { sessionProcessIdentityFor } from "../core/process-identity.js";
 
@@ -32,6 +32,8 @@ export function coordinationUsage(): string[] {
     "  interlock task reap <id> --pane <operator-pane> --token <token> --dead-claimer <pane>  (claimer session must be done)",
     "  interlock send --from-pane <pane> --to-pane <pane> --token <token> --text <text> [--workspace <ws>] [--reply <message-id>] [--channel <channel-id>]",
     "  interlock inbox --pane <pane> --token <token> [--all] [--json]",
+    "  interlock inbox claim --message <id> --pane <pane> --token <token>",
+    "  interlock inbox close --message <id> --pane <pane> --token <token>",
     "  interlock session set --pane <pane> --token <token> --state <idle|busy|done>",
     "  interlock watch --once",
     "  interlock dashboard --once [--json]",
@@ -291,7 +293,11 @@ function taskCommand(argv: string[]): string {
     const result = withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
       assertNotDoneLeader(state, pane, "task stage");
-      const task = ownedTask(state, id, pane); task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
+      const task = ownedTask(state, id, pane);
+      // il-2t8: the owner drives the task along the transition matrix; jumps
+      // that reopen terminal work or manufacture claims are refused.
+      assertTaskStageTransition(id, task.stage, stage);
+      task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
       const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
       return { task: { ...task }, digests };
     });
@@ -318,7 +324,12 @@ function sendCommand(argv: string[]): string {
     const id = state.nextMessageId++;
     const now = new Date().toISOString();
     const message: CoordinationMessage = { id, threadId: parent?.threadId ?? id, replyTo: replyTo ?? null, fromPane, toPane, workspace: optional(parsed, "workspace"), text: required(parsed, "text"), state: "queued", claimer: null, createdAt: now };
-    if (parent && (parent.state === "queued" || parent.state === "claimed")) parent.state = "handled";
+    if (parent && (parent.state === "queued" || parent.state === "claimed")) {
+      // A reply hands the thread back: the parent moves queued/claimed ->
+      // handled, which the message matrix already permits.
+      assertMessageStageTransition(parent.id, parent.state, "handled");
+      parent.state = "handled";
+    }
     state.messages.push(message);
     // The send cleared the boundary: a channel send counts toward the channel's
     // closing message count (R11). Intra-pod sends never carry a channel id.
@@ -335,6 +346,28 @@ function sendCommand(argv: string[]): string {
 }
 
 function inboxCommand(argv: string[]): string {
+  const subcommand = argv[0];
+  if (subcommand === "claim" || subcommand === "close") {
+    // il-2t8: claimed and closed were unreachable through the CLI. The
+    // addressed pane claims its own queued mail and closes out claimed or
+    // handled mail; the matrix forbids resurrecting terminal messages.
+    const target: MessageStage = subcommand === "claim" ? "claimed" : "closed";
+    const parsed = parseArgs(argv.slice(1));
+    const pane = validatePaneName(required(parsed, "pane"));
+    const token = requiredToken(parsed);
+    const id = optionalNumber(parsed, "message");
+    if (id === undefined) throw new Error("--message is required");
+    const result = withCoordinationLock((state) => {
+      assertMemberToken(state, pane, token);
+      const found = state.messages.find((candidate) => candidate.id === id);
+      if (found === undefined) throw new Error(`unknown message #${id}`);
+      if (found.toPane !== pane) throw new Error(`message #${id} is not addressed to ${pane}`);
+      assertMessageStageTransition(found.id, found.state, target);
+      found.state = target;
+      return { ...found };
+    });
+    return JSON.stringify({ ok: true, message: result });
+  }
   const parsed = parseArgs(argv);
   const state = readCoordinationState();
   const pane = validatePaneName(required(parsed, "pane"));

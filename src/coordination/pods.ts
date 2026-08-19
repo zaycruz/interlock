@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-import type { AwarenessEvent, AwarenessEventKind, CoordinationState, LeaderChannel, Pod, PodMember } from "./types.js";
+import type { AwarenessEvent, AwarenessEventKind, CoordinationState, LeaderChannel, MessageStage, Pod, PodMember, TaskStage } from "./types.js";
 import { ORCHESTRATOR_MEMBER, tokenHash } from "./state.js";
 import { validateCoordinationName } from "./validation.js";
 import { inspectProcess } from "../core/process-identity.js";
@@ -53,6 +53,45 @@ export const AWARENESS_FEED_MAX_EVENTS = 1000;
 // mystery failure.
 export const MAX_PODS_PER_DEPLOYMENT = 64;
 export const MAX_ROSTER_SIZE = 16;
+
+// il-2t8: stage transitions are a matrix, not a free-for-all. Tasks move
+// forward through the work lifecycle and may recycle forward stages (a fresh
+// look at in-progress work), but a task never reopens from done/closed and
+// never manufactures a claim out of in-progress/blocked. Messages follow the
+// same shape, with one extra rule: queued messages are still awaiting digest
+// delivery, and closing is digest-invisible, so a queued message must be
+// claimed (or answered, which marks it handled) before it can be closed —
+// otherwise mail could vanish without ever surfacing in a digest.
+const TASK_STAGE_TRANSITIONS: Record<TaskStage, ReadonlySet<TaskStage>> = {
+  open: new Set<TaskStage>(["claimed", "closed"]),
+  claimed: new Set<TaskStage>(["open", "in-progress", "blocked", "done", "closed"]),
+  "in-progress": new Set<TaskStage>(["open", "in-progress", "blocked", "done", "closed"]),
+  blocked: new Set<TaskStage>(["open", "in-progress", "done", "closed"]),
+  done: new Set<TaskStage>(["closed"]),
+  closed: new Set<TaskStage>(),
+};
+
+const MESSAGE_STAGE_TRANSITIONS: Record<MessageStage, ReadonlySet<MessageStage>> = {
+  queued: new Set<MessageStage>(["claimed", "handled"]),
+  claimed: new Set<MessageStage>(["claimed", "handled", "closed"]),
+  handled: new Set<MessageStage>(["closed"]),
+  closed: new Set<MessageStage>(),
+};
+
+function assertTransition<T extends string>(transitions: Record<T, ReadonlySet<T>>, kind: string, id: string, from: T, to: T): void {
+  if (from === to) return;
+  if (!transitions[from].has(to)) {
+    throw new Error(`${kind} ${id} cannot move from ${from} to ${to}`);
+  }
+}
+
+export function assertTaskStageTransition(id: string, from: TaskStage, to: TaskStage): void {
+  assertTransition(TASK_STAGE_TRANSITIONS, "task", id, from, to);
+}
+
+export function assertMessageStageTransition(id: number, from: MessageStage, to: MessageStage): void {
+  assertTransition(MESSAGE_STAGE_TRANSITIONS, "message", `#${id}`, from, to);
+}
 
 // QA il-026 MF-1: C0 control characters (in particular CR, LF, and ESC) are
 // rejected outright: the awareness feed renders topics into line-oriented
