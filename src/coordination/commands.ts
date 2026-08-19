@@ -1,10 +1,11 @@
 import { readFileSync, unlinkSync } from "node:fs";
 
-import { closeLeaderChannel, closePod, createPod, evaluatePreSend, openLeaderChannel, parsePodTemplate } from "./pods.js";
+import { assertNotDoneLeader, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, SessionState, TaskStage } from "./types.js";
-import { validatePaneName, validateTaskId } from "./validation.js";
+import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
+import { sessionProcessIdentityFor } from "../core/process-identity.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -39,6 +40,7 @@ export function coordinationUsage(): string[] {
     "  interlock state migrate --legacy-pod <name> --legacy-leader <pane>  (operator: one-time version-1 upgrade; run orchestrator init first)",
     "  interlock pod create --name <pod> --template <file> --orchestrator-token <token>  (member tokens are printed once)",
     "  interlock pod close --pod <pod> --orchestrator-token <token>",
+    "  interlock pod rebind --member <member> --token <token> [--pid <pid>]  (verified-dead identity only; binds the caller or an ancestor process)",
     "  interlock pod list [--json]",
     "  interlock pod show --pod <pod> [--json]",
     "  interlock pod channel open --pod <pod> --to-pod <pod> --member <leader> --token <token> --topic <topic>  (topic required, max 140 chars)",
@@ -87,6 +89,21 @@ function podCommand(argv: string[]): string {
     });
     return JSON.stringify({ ok: true, ...closed });
   }
+  if (subcommand === "rebind") {
+    const member = validateMemberName(required(parsed, "member"));
+    const token = requiredToken(parsed);
+    // ADR 0003 D6 (MF-A): the rebind binds the calling process's own identity
+    // engine-side. An optional --pid names the caller or one of its ancestors
+    // (the il-8o3 session guard); a foreign pid is rejected, so a stolen token
+    // can never pin the member to an unrelated or immortal process.
+    const pidArg = optionalNumber(parsed, "pid");
+    const identity = pidArg === undefined ? sessionProcessIdentityFor(process.pid) : sessionProcessIdentityFor(pidArg);
+    const rebound = withCoordinationLock((state) => {
+      assertMemberToken(state, member, token);
+      return rebindMemberProcess(state, member, identity);
+    });
+    return JSON.stringify({ ok: true, member: rebound });
+  }
   // Read-only views, same posture as the dashboard: no token, no mutation.
   if (subcommand === "list") {
     const state = readCoordinationState();
@@ -104,7 +121,7 @@ function podCommand(argv: string[]): string {
     for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
     return lines.join("\n");
   }
-  throw new Error("pod requires create, close, list, or show");
+  throw new Error("pod requires create, close, rebind, list, or show");
 }
 
 function channelCommand(argv: string[]): string {
@@ -207,6 +224,7 @@ function taskCommand(argv: string[]): string {
     const token = requiredToken(parsed);
     const task = withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task add");
       if (state.tasks.some((candidate) => candidate.id === id)) throw new Error(`task ${id} already exists`);
       const now = new Date().toISOString();
       const ownerPane = optional(parsed, "owner-pane");
@@ -251,6 +269,7 @@ function taskCommand(argv: string[]): string {
   if (subcommand === "claim") {
     return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task claim");
       const task = findTask(state, id);
       if (task.stage !== "open" || task.claimer !== null) {
         throw new Error(`claim_conflict: task ${id} is ${task.stage}, claimed by ${task.claimer ?? "unknown"} (revision ${task.revision})`);
@@ -262,6 +281,7 @@ function taskCommand(argv: string[]): string {
   if (subcommand === "progress") {
     return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task progress");
       const task = ownedTask(state, id, pane); if (task.stage === "claimed") task.stage = "in-progress"; task.revision += 1; task.lastProgressAt = new Date().toISOString(); return { ...task };
     }) });
   }
@@ -270,6 +290,7 @@ function taskCommand(argv: string[]): string {
     if (!stage || !TASK_STAGES.includes(stage)) throw new Error(`task stage must be one of ${TASK_STAGES.join("|")}`);
     const result = withCoordinationLock((state) => {
       assertMemberToken(state, pane, token);
+      assertNotDoneLeader(state, pane, "task stage");
       const task = ownedTask(state, id, pane); task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
       const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
       return { task: { ...task }, digests };
@@ -307,7 +328,9 @@ function sendCommand(argv: string[]): string {
     }
     const digests = deliverDigests(state, "watcher-heartbeat");
     return { message, digests };
-  });
+    // commitOnThrow: a rejected send can still carry a verified leader death
+    // and promotion, which must be committed (see withCoordinationLock).
+  }, { commitOnThrow: true });
   return JSON.stringify({ ok: true, ...result });
 }
 
@@ -345,6 +368,9 @@ function sessionCommand(argv: string[]): string {
     const now = new Date().toISOString();
     const existing = state.sessions.find((session) => session.pane === pane);
     if (existing) { existing.state = sessionState; existing.lastSeenAt = now; } else state.sessions.push({ pane, state: sessionState, lastSeenAt: now });
+    // ADR 0003 D6 (R14, MF-C): a leader reporting done fires leader-done and
+    // sheds external reach (its open channels close) without promoting anyone.
+    if (sessionState === "done") recordLeaderDone(state, pane);
     const digests = sessionState === "idle" || sessionState === "done" ? deliverDigests(state, sessionState === "done" ? "agent-done" : "agent-idle") : [];
     return { session: state.sessions.find((session) => session.pane === pane), digests };
   });
@@ -354,7 +380,14 @@ function sessionCommand(argv: string[]): string {
 function watchCommand(argv: string[]): string {
   const parsed = parseArgs(argv);
   if (!has(parsed, "once")) throw new Error("watch requires --once; use a timer or service to invoke the heartbeat");
-  const result = withCoordinationLock((state) => { state.lastWatchAt = new Date().toISOString(); const digests = deliverDigests(state, "watcher-heartbeat"); return { heartbeatAt: state.lastWatchAt, digests }; });
+  const result = withCoordinationLock((state) => {
+    state.lastWatchAt = new Date().toISOString();
+    // ADR 0003 D6: the watch sweep is an evaluation point for leader death,
+    // alongside the lazy pre-send evaluation in evaluatePreSend.
+    for (const pod of state.pods) evaluateSuccession(state, pod.leader);
+    const digests = deliverDigests(state, "watcher-heartbeat");
+    return { heartbeatAt: state.lastWatchAt, digests };
+  });
   return JSON.stringify({ ok: true, digested: result.digests.length, messageIds: result.digests.flatMap((digest) => digest.messageIds), ...result });
 }
 

@@ -78,16 +78,25 @@ function removeStaleTemporaryFiles(): void {
   }
 }
 
-export function withCoordinationLock<T>(operation: (state: CoordinationState) => T): T {
+export function withCoordinationLock<T>(operation: (state: CoordinationState) => T, options?: { commitOnThrow?: boolean }): T {
   mkdirSync(coordinationStateDir(), { recursive: true });
   const lock = coordinationLockPath();
   const owner: CoordinationLockOwner = { token: randomUUID(), pid: process.pid, acquiredAt: Date.now() };
   acquireCoordinationLock(lock, owner);
   try {
     const state = readCoordinationState();
-    const result = operation(state);
-    writeCoordinationState(state);
-    return result;
+    try {
+      const result = operation(state);
+      writeCoordinationState(state);
+      return result;
+    } catch (error) {
+      // ADR 0003 D6 (MF-D): a send rejected by the routing boundary can still
+      // carry a verified leader death and promotion, which must be committed —
+      // death is a fact the engine observed, not a side effect of a successful
+      // send. Only the send path opts in; every other rejection stays atomic.
+      if (options?.commitOnThrow) writeCoordinationState(state);
+      throw error;
+    }
   } finally {
     releaseCoordinationLock(lock, owner.token);
   }
@@ -177,7 +186,7 @@ export function migrateLegacyCoordinationState(legacyPod: string, legacyLeader: 
     const now = new Date().toISOString();
     const names = Object.keys(tokens).filter((name) => name !== ORCHESTRATOR_MEMBER).sort();
     const pod: Pod = { name: podName, createdAt: now, leader, succession: [leader, ...names.filter((name) => name !== leader)], status: "open", closedAt: null };
-    const members: PodMember[] = names.map((member) => ({ member, pod: podName, role: member === leader ? "leader" as const : "worker" as const, process: null, registeredAt: now }));
+    const members: PodMember[] = names.map((member) => ({ member, pod: podName, role: member === leader ? "leader" as const : "worker" as const, process: null, registeredAt: now, diedAt: null, doneAt: null }));
     // Schema invariant: the leader is a pod member and exactly one member holds the leader role.
     const leaders = members.filter((member) => member.role === "leader");
     if (leaders.length !== 1 || leaders[0]!.member !== leader) throw new Error("internal: migration must produce a pod with exactly one leader-role member");
@@ -227,6 +236,7 @@ function normalizeState(value: unknown): CoordinationState {
   state.nextDigestId = idCounter(value.nextDigestId, highestId(state.digests, "digest"));
   state.nextChannelId = idCounter(value.nextChannelId, highestId(state.leaderChannels, "channel"));
   state.nextAwarenessEventId = idCounter(value.nextAwarenessEventId, highestId(state.awarenessEvents, "awareness event"));
+  assertSuccessionIntegrity(state);
   return state;
 }
 
@@ -373,8 +383,36 @@ function podMembers(value: unknown): PodMember[] {
     if (member.process !== null && (!isRecord(member.process) || !Number.isSafeInteger(member.process.pid) || (member.process.pid as number) <= 0 || typeof member.process.startedAt !== "string")) {
       throw new Error("coordination member " + member.member + " process identity is corrupt");
     }
+    if (member.diedAt !== undefined && member.diedAt !== null && typeof member.diedAt !== "string") throw new Error("coordination member " + member.member + " death timestamp is corrupt");
+    if (member.doneAt !== undefined && member.doneAt !== null && typeof member.doneAt !== "string") throw new Error("coordination member " + member.member + " done timestamp is corrupt");
+    // Pre-slice-4 state has no terminal markers; default them to null so the
+    // lifecycle stays idempotent from the first post-upgrade event onward.
+    if (member.diedAt === undefined) member.diedAt = null;
+    if (member.doneAt === undefined) member.doneAt = null;
   }
   return list;
+}
+
+// ADR 0003 D6: persisted succession integrity, fail-closed at load. Each pod's
+// succession must be a non-empty duplicate-free ranked list over exactly the
+// pod's roster, and the pod's leader must hold the leader role in that roster.
+// Anything else is a tampered or torn write and the state refuses to load.
+function assertSuccessionIntegrity(state: CoordinationState): void {
+  const byName = new Map(state.podMembers.map((member) => [member.member, member]));
+  for (const pod of state.pods) {
+    if (pod.succession.length === 0) throw new Error("coordination pod " + pod.name + " succession is empty; every pod needs a ranked succession");
+    const seen = new Set<string>();
+    for (const member of pod.succession) {
+      if (seen.has(member)) throw new Error("coordination pod " + pod.name + " succession repeats member " + member);
+      seen.add(member);
+      const record = byName.get(member);
+      if (record === undefined) throw new Error("coordination pod " + pod.name + " succession member " + member + " is not in the pod roster");
+      if (record.pod !== pod.name) throw new Error("coordination pod " + pod.name + " succession member " + member + " belongs to pod " + record.pod + ", not " + pod.name);
+    }
+    const leader = byName.get(pod.leader);
+    if (leader === undefined || leader.pod !== pod.name) throw new Error("coordination pod " + pod.name + " leader " + pod.leader + " is not in the pod roster");
+    if (leader.role !== "leader") throw new Error("coordination pod " + pod.name + " leader " + pod.leader + " does not hold the leader role");
+  }
 }
 
 function leaderChannels(value: unknown): LeaderChannel[] {

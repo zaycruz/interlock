@@ -61,6 +61,10 @@ export interface PodMember {
   role: "leader" | "worker";
   process: ProcessIdentity | null;
   registeredAt: string;
+  // Terminal lifecycle markers (ADR 0003 D6): set once, never cleared, so
+  // leader-death-verified and leader-done fire exactly once per member.
+  diedAt: string | null;
+  doneAt: string | null;
 }
 
 export interface LeaderChannel {
