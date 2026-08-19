@@ -116,3 +116,10 @@ tracked here for a future issue/runbook pass.
     be reaped; a session heartbeat or pane process registration is the
     follow-up if that wedges work. Source: qa-w380-review.md re-review
     2026-08-15.
+
+16. Digest-id floor readdir scan — accepted risk, robustness-only.
+    highestDeliveryDigestId scans the deliveries directory on every load; a
+    foreign non-directory entry there would wedge load with ENOTDIR. Per the
+    same-user filesystem rule this is not a security boundary; suggested
+    fix is to skip non-directory entries during the scan. Source: QA
+    re-review v002-extras-fixround 2026-08-19 (msg #766).
