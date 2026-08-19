@@ -330,6 +330,9 @@ export function openLeaderChannel(state: CoordinationState, member: string, podN
   const declaredTopic = validateChannelTopic(topic);
   if (podName === toPodName) throw new Error("leader channel endpoints must be two different pods");
   const from = leaderMembership(state, member, podName);
+  // D6: channel open is part of the leader's external authority, so it
+  // follows the same post-done power reduction as send and task mutations.
+  assertNotDoneLeader(state, member, "pod channel open");
   const toPod = state.pods.find((candidate) => candidate.name === toPodName);
   if (toPod === undefined) throw new Error("unknown pod " + toPodName);
   if (from.pod.status === "closed") throw new Error("pod " + podName + " is closed; no new channels");
