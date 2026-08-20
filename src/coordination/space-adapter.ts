@@ -13,6 +13,7 @@ export interface SpaceSendInput {
   token: string;
   workspace?: string;
   reply?: number;
+  channel?: number;
 }
 
 export interface SpaceSendResult {
@@ -70,6 +71,7 @@ export function createSpaceAdapter(): SpaceAdapter {
       "--text", input.text,
       ...(input.workspace === undefined ? [] : ["--workspace", input.workspace]),
       ...(input.reply === undefined ? [] : ["--reply", String(input.reply)]),
+      ...(input.channel === undefined ? [] : ["--channel", String(input.channel)]),
     ]),
     inbox: (input) => invoke<SpaceInboxResult>("inbox", [
       "inbox",
