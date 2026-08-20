@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -60,9 +60,13 @@ function doctor(deps: Required<SetupDoctorDependencies>): CommandResult {
 function setup(flags: string[], deps: Required<SetupDoctorDependencies>): CommandResult {
   const remove = flags.includes("--remove");
   const herdr = detectHerdr(deps);
-  if (herdr === undefined || herdr === null) return remove ? failure(`herdr not usable: ${herdr === null ? herdrReason(deps) : "not detected"}`) : success("herdr is not usable; Interlock works standalone. Nothing was changed.");
+  if (herdr === undefined || herdr === null) {
+    if (!remove) return success("herdr is not usable; Interlock works standalone. Nothing was changed.");
+    deps.removeConsent();
+    return success(`herdr ${herdr === null ? `not usable: ${herdrReason(deps)}` : "not detected"}; skipped plugin unlink.\nRemoved Interlock's consent record.`);
+  }
   const plugin = deps.plugin();
-  if (remove) return removePlugin(deps, herdr, plugin);
+  if (remove) return removePlugin(deps, plugin);
   const activePlugin = pluginListed(deps);
   if (plugin !== undefined && plugin.version === deps.engineVersion && activePlugin.includes(plugin.version)) return success("Herdr plugin already installed.");
   if (plugin !== undefined && compareVersions(plugin.version, deps.engineVersion) > 0) return failure(`Plugin ${plugin.version} is newer than engine ${deps.engineVersion}; upgrade Interlock instead of downgrading the plugin.`);
@@ -97,7 +101,7 @@ function setup(flags: string[], deps: Required<SetupDoctorDependencies>): Comman
   return success([...output, "Herdr plugin installed and verified."].join("\n"));
 }
 
-function removePlugin(deps: Required<SetupDoctorDependencies>, herdr: Herdr, plugin: PluginPackage | undefined): CommandResult {
+function removePlugin(deps: Required<SetupDoctorDependencies>, plugin: PluginPackage | undefined): CommandResult {
   if (plugin === undefined) return failure(`Cannot unlink ${PLUGIN_NAME}: its plugin path is not resolvable.`);
   const output: string[] = [];
   const failed = runEchoed(deps, output, "herdr", ["plugin", "unlink", plugin.path]);
@@ -155,17 +159,33 @@ function defaults(overrides: SetupDoctorDependencies): Required<SetupDoctorDepen
   return {
     engineVersion: overrides.engineVersion ?? "0.0.4", minimumHerdrVersion: overrides.minimumHerdrVersion ?? DEFAULT_HERDR_FLOOR,
     stateDirectory: overrides.stateDirectory ?? stateDirectory,
-    inspectStateDirectory: overrides.inspectStateDirectory ?? (() => "healthy"),
+    inspectStateDirectory: overrides.inspectStateDirectory ?? (() => inspectStateDirectory((overrides.stateDirectory ?? stateDirectory)(), consentPath())),
     resolveCommand: overrides.resolveCommand ?? resolveCommand,
     execute: overrides.execute ?? execute,
     plugin: overrides.plugin ?? resolvePlugin,
-    readConsent: overrides.readConsent ?? (() => existsSync(consentPath()) ? JSON.parse(readFileSync(consentPath(), "utf8")) as ConsentRecord : undefined),
+    readConsent: overrides.readConsent ?? (() => readConsent(consentPath())),
     writeConsent: overrides.writeConsent ?? ((record) => { mkdirSync((overrides.stateDirectory ?? stateDirectory)(), { recursive: true }); writeFileSync(consentPath(), JSON.stringify(record)); }),
     removeConsent: overrides.removeConsent ?? (() => rmSync(consentPath(), { force: true })),
     isTty: overrides.isTty ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true),
     prompt: overrides.prompt ?? readConsentAnswer, clock: overrides.clock ?? (() => new Date()),
   };
 }
+
+function inspectStateDirectory(directory: string, consentPath: string): "healthy" | string {
+  try {
+    if (!existsSync(directory)) return "missing";
+    if (!statSync(directory).isDirectory()) return "not a directory";
+    accessSync(directory, constants.R_OK | constants.W_OK);
+    if (existsSync(consentPath)) JSON.parse(readFileSync(consentPath, "utf8"));
+    return "healthy";
+  } catch (error) { return `invalid consent record or inaccessible: ${errorMessage(error)}`; }
+}
+
+function readConsent(path: string): ConsentRecord | undefined {
+  if (!existsSync(path)) return undefined;
+  try { return JSON.parse(readFileSync(path, "utf8")) as ConsentRecord; } catch { return undefined; }
+}
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 function resolveCommand(name: string): string | undefined {
   for (const directory of (process.env.PATH ?? "").split(":")) { const candidate = join(directory, name); if (existsSync(candidate)) return candidate; }

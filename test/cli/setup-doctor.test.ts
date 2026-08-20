@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCli } from "../../src/cli/index.js";
@@ -102,4 +105,35 @@ test("doctor fails with the exact reason when herdr is below the compatibility f
 
   assert.equal(result.exitCode, 1);
   assert.match(result.stdout, /herdr not usable: version 1\.1\.9 is below required 1\.2\.0/);
+});
+
+test("doctor reports an invalid consent record as unhealthy without throwing", () => {
+  const stateDirectory = mkdtempSync(join(tmpdir(), "interlock-doctor-"));
+  try {
+    writeFileSync(join(stateDirectory, "herdr-consent.json"), "not json");
+    const result = runCli(["doctor"], {
+      setupDoctor: { stateDirectory: () => stateDirectory, resolveCommand: () => undefined, plugin: () => undefined },
+    });
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stdout, /state directory: .*invalid consent record/);
+    assert.match(result.stdout, /consent record: absent/);
+  } finally { rmSync(stateDirectory, { recursive: true, force: true }); }
+});
+
+test("setup --remove clears Interlock consent when herdr is no longer usable", () => {
+  let removed = false;
+  const result = runCli(["setup", "--remove"], {
+    setupDoctor: {
+      resolveCommand: () => undefined,
+      removeConsent: () => { removed = true; },
+      stateDirectory: () => "/state/interlock",
+      inspectStateDirectory: () => "healthy",
+    },
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(removed, true);
+  assert.match(result.stdout, /herdr not detected; skipped plugin unlink/);
+  assert.match(result.stdout, /Removed Interlock's consent record/);
 });
