@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
-import { assertMessageStageTransition, assertNotDoneLeader, assertTaskStageTransition, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
+import { appointPod, assertMessageStageTransition, assertNotDoneLeader, assertTaskStageTransition, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
 import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery, writeDigestDeliveryFile } from "./state.js";
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, MessageStage, SessionState, TaskStage } from "./types.js";
@@ -41,6 +41,7 @@ export function coordinationUsage(): string[] {
     "  interlock orchestrator init [--rotate]  (operator: mint the orchestrator token, printed once; --rotate replaces a lost token)",
     "  interlock state migrate --legacy-pod <name> --legacy-leader <pane>  (operator: one-time version-1 upgrade; run orchestrator init first)",
     "  interlock pod create --name <pod> --template <file> --orchestrator-token <token>  (member tokens are printed once)",
+    "  interlock pod appoint --pod <pod> (--leader <member> | --member <name> [--role <leader|worker>] [--no-succession]) --orchestrator-token <token>",
     "  interlock pod close --pod <pod> --orchestrator-token <token>",
     "  interlock pod rebind --member <member> --token <token> [--pid <pid>]  (verified-dead identity only; binds the caller or an ancestor process)",
     "  interlock pod list [--json]",
@@ -91,6 +92,23 @@ function podCommand(argv: string[]): string {
     });
     return JSON.stringify({ ok: true, ...closed });
   }
+  if (subcommand === "appoint") {
+    const name = required(parsed, "pod");
+    const orchestratorToken = required(parsed, "orchestrator-token");
+    const leader = optional(parsed, "leader");
+    const member = optional(parsed, "member");
+    if ((leader === null) === (member === null)) throw new Error("pod appoint requires exactly one of --leader or --member");
+    if (leader !== null && (has(parsed, "role") || has(parsed, "no-succession"))) throw new Error("--role and --no-succession apply only when adding --member");
+    const role = optional(parsed, "role") ?? "worker";
+    if (role !== "leader" && role !== "worker") throw new Error("--role must be leader or worker");
+    const appointed = withCoordinationLock((state) => {
+      assertOrchestratorToken(state, orchestratorToken);
+      return leader !== null
+        ? appointPod(state, name, { leader })
+        : appointPod(state, name, { member: member!, role, succession: !has(parsed, "no-succession") });
+    });
+    return JSON.stringify({ ok: true, ...appointed, notice: Object.keys(appointed.tokens).length === 0 ? undefined : "member tokens are printed exactly once; distribute them to member processes out of band" });
+  }
   if (subcommand === "rebind") {
     const member = validateMemberName(required(parsed, "member"));
     const token = requiredToken(parsed);
@@ -123,7 +141,7 @@ function podCommand(argv: string[]): string {
     for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
     return lines.join("\n");
   }
-  throw new Error("pod requires create, close, rebind, list, or show");
+  throw new Error("pod requires create, appoint, close, rebind, list, or show");
 }
 
 function channelCommand(argv: string[]): string {

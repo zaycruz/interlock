@@ -78,7 +78,7 @@ export interface LeaderChannel {
 }
 
 export type AwarenessEventKind = "pod-created" | "pod-closed" | "channel-opened" | "channel-closed"
-  | "leader-death-verified" | "leader-promoted" | "leader-done";
+  | "leader-death-verified" | "leader-promoted" | "leader-done" | "member-appointed";
 
 // Metadata only: pod names, member names, topic, messageCount. Never text (ADR 0003 D1/D5).
 export interface AwarenessEvent {
