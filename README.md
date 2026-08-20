@@ -31,6 +31,102 @@ interlock dashboard --once
 `dashboard` only reads coordination state. It is the human awareness surface;
 task and message mutations remain agent/CLI operations.
 
+## Interlock in Herdr
+
+Use the Herdr adapter when you run Interlock from Herdr panes.
+
+### Install the engine and adapter
+
+Install the Interlock engine from npm.
+
+```sh
+npm install -g @raava-solutions/interlock
+```
+
+Run setup from a terminal that can use Herdr.
+
+```sh
+interlock setup
+```
+
+Read the setup plan before you answer the prompt.
+
+Type `yes` to install the `@raava-solutions/interlock-plugin-herdr` adapter.
+
+Setup echoes each host command before it runs the command.
+
+Setup installs the adapter package when the expected version is not resolvable.
+
+Setup activates the adapter only through `herdr plugin link <path>`.
+
+Setup does not write Herdr configuration files directly.
+
+Run the scriptable form only when your automation provides explicit consent.
+
+```sh
+interlock setup --yes
+```
+
+Run `interlock setup --remove` to unlink the adapter.
+
+The remove command keeps the npm package installed.
+
+### Check the integration
+
+Run this command after setup and before you diagnose a Herdr problem.
+
+```sh
+interlock doctor
+```
+
+Doctor does not change Herdr or Interlock state.
+
+Doctor checks the engine version, the Interlock state directory, the consent
+record, Herdr availability, the plugin link, and engine-plugin version drift.
+
+Doctor reports an unusable Herdr binary with the exact reason.
+
+Run `interlock setup --yes` to repair a missing link or an older adapter.
+
+Upgrade the engine when doctor reports that the adapter is newer than the
+engine.
+
+### Provision pane tokens
+
+**Warning:** Treat each pane token as a bearer secret.
+
+Do not put a token in a message, a task value, or a tracked file.
+
+Store each pane token in the 1Password team vault.
+
+Name each item `interlock member token <pane>`.
+
+Give the token only to the matching Herdr pane session.
+
+Herdr provisions one token for each pane through `interlock session register`.
+
+Interlock stores only the token hash in its state directory.
+
+### Send messages from panes
+
+The Herdr adapter maps each pane to one Interlock member.
+
+The adapter registers the pane session with its pane token.
+
+The adapter sends pane messages through Interlock channels.
+
+Members can message members in the same pod.
+
+Only pod leaders can use a channel to message a leader in another pod.
+
+The adapter updates session state when a pane becomes idle, busy, or done.
+
+Interlock writes durable digests for idle panes and done panes.
+
+The adapter reads the shared `$INTERLOCK_STATE_DIR` state directory.
+
+The adapter does not keep a second message or digest store.
+
 Herdr provisions one token per pane with `session register`; the coordination
 state stores only token hashes. Mutating commands and pane-scoped inbox reads
 must present the matching token. Pane and task identifiers accept only

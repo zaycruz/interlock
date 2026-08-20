@@ -31,6 +31,7 @@ import {
 import { assertStagedPathsAreOwned } from "./staged-paths.js";
 import { readInterlockBoard, readInterlockSnapshot } from "./snapshot.js";
 import { coordinationUsage, runCoordinationCli } from "../coordination/index.js";
+import { runSetupDoctor, type SetupDoctorDependencies } from "./setup-doctor.js";
 
 export interface CliResult { exitCode: number; stdout: string; stderr: string; }
 export interface CliDependencies {
@@ -40,6 +41,7 @@ export interface CliDependencies {
   processIdentityFor?: (pid: number) => ProcessIdentity;
   lifecycleProcessor?: () => ProcessIdentity;
   clock?: () => number;
+  setupDoctor?: SetupDoctorDependencies;
 }
 
 type Command =
@@ -55,6 +57,8 @@ type Command =
 export function runCli(argv: string[], dependencies: CliDependencies = {}): CliResult {
   const coordination = runCoordinationCli(argv);
   if (coordination !== null) return coordination;
+  const setupDoctor = runSetupDoctor(argv, dependencies.setupDoctor);
+  if (setupDoctor !== null) return setupDoctor;
   if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "help")) return { exitCode: 0, stdout: `${usage()}\n`, stderr: "" };
   try {
     const command = parseCommand(argv);
@@ -526,5 +530,5 @@ export function usage(): string {
     "  interlock status <bead-id> [--json] [--repo <repo>]", "  interlock status --all --json [--repo <repo>]", "  interlock heartbeat <bead-id> [--repo <repo>]",
     "  interlock complete <bead-id> [--repo <repo>]", "  interlock release <bead-id> --reason <reason> [--repo <repo>]",
     "  interlock resolve <bead-id> [--repo <repo>]  (operator: clear or confirm an ambiguous attempted claim after inspecting Beads)",
-    "  interlock reconcile [--repo <repo>]", ...coordinationUsage()] .join("\n");
+    "  interlock reconcile [--repo <repo>]", "  interlock setup [--yes] [--remove]", "  interlock doctor", ...coordinationUsage()] .join("\n");
 }
