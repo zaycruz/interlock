@@ -59,3 +59,21 @@ test("space.js operations delegate to one Interlock coordination state", () => {
   assert.equal(reply.message.toPane, "wT:p1");
   assert.equal(nativeJson(["inbox", "--pane", "wT:p1", "--token", p1Token, "--json"]).messages[0].text, "ack");
 });
+
+test("space.js adapter forwards a leader channel for cross-pod sends", () => {
+  isolatedState();
+  const adapter = createSpaceAdapter();
+  const orchestrator = nativeJson(["orchestrator", "init"]).token as string;
+  const engTemplate = join(process.env.INTERLOCK_STATE_DIR!, "template-eng.json");
+  const opsTemplate = join(process.env.INTERLOCK_STATE_DIR!, "template-ops.json");
+  writeFileSync(engTemplate, JSON.stringify({ members: ["wT:p1"], leader: "wT:p1", succession: ["wT:p1"] }));
+  writeFileSync(opsTemplate, JSON.stringify({ members: ["wQ:p1"], leader: "wQ:p1", succession: ["wQ:p1"] }));
+  const eng = nativeJson(["pod", "create", "--name", "eng", "--template", engTemplate, "--orchestrator-token", orchestrator]);
+  const ops = nativeJson(["pod", "create", "--name", "ops", "--template", opsTemplate, "--orchestrator-token", orchestrator]);
+  const channel = nativeJson(["pod", "channel", "open", "--pod", "eng", "--to-pod", "ops", "--member", "wT:p1", "--token", eng.tokens["wT:p1"], "--topic", "release"]);
+
+  const sent = adapter.send({ fromPane: "wT:p1", toPane: "wQ:p1", token: eng.tokens["wT:p1"], text: "ready", channel: channel.channel.id });
+
+  assert.equal(sent.message.toPane, "wQ:p1");
+  assert.equal(nativeJson(["inbox", "--pane", "wQ:p1", "--token", ops.tokens["wQ:p1"], "--json"]).messages[0].text, "ready");
+});
