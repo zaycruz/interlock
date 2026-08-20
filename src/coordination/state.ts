@@ -10,7 +10,7 @@ import { assertSupportedPlatform } from "../core/platform.js";
 
 export const ORCHESTRATOR_MEMBER = "orchestrator";
 
-const AWARENESS_EVENT_KINDS: readonly AwarenessEventKind[] = ["pod-created", "pod-closed", "channel-opened", "channel-closed", "leader-death-verified", "leader-promoted", "leader-done"];
+const AWARENESS_EVENT_KINDS: readonly AwarenessEventKind[] = ["pod-created", "pod-closed", "channel-opened", "channel-closed", "leader-death-verified", "leader-promoted", "leader-done", "member-appointed"];
 
 const LOCK_WAIT_MS = 60_000;
 const LOCK_POLL_MS = 10;

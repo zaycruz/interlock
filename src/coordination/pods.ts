@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 
 import type { AwarenessEvent, AwarenessEventKind, CoordinationState, LeaderChannel, MessageStage, Pod, PodMember, TaskStage } from "./types.js";
 import { ORCHESTRATOR_MEMBER, tokenHash } from "./state.js";
-import { validateCoordinationName } from "./validation.js";
+import { validateCoordinationName, validateMemberName } from "./validation.js";
 import { inspectProcess } from "../core/process-identity.js";
 import type { ProcessIdentity } from "../core/types.js";
 
@@ -33,6 +33,17 @@ export interface OpenedChannel {
 
 export interface ClosedChannel {
   channel: LeaderChannel;
+}
+
+export type PodAppointment =
+  | { leader: string }
+  | { member: string; role: "leader" | "worker"; succession: boolean };
+
+export interface AppointedPod {
+  pod: Pod;
+  member: PodMember;
+  // A growth appointment mints a member token and returns it exactly once.
+  tokens: Record<string, string>;
 }
 
 // ADR 0003 D4: every channel carries a declared topic at open time (R8, AE6),
@@ -183,6 +194,64 @@ export function createPod(state: CoordinationState, name: string, template: PodT
   state.podMembers.push(...members);
   appendAwarenessEvent(state, "pod-created", { pod: podName, members: [...template.members], member: template.leader });
   return { pod, members, tokens };
+}
+
+// ADR-0003 Amendment B: topology changes are orchestrator-mediated. An
+// existing roster member can be appointed leader, or a new member can join
+// the roster and optionally become leader in the same atomic mutation.
+export function appointPod(state: CoordinationState, name: string, appointment: PodAppointment): AppointedPod {
+  const pod = state.pods.find((candidate) => candidate.name === name);
+  if (pod === undefined) throw new Error("unknown pod " + name);
+  if (pod.status === "closed") throw new Error("pod " + name + " is closed");
+
+  if ("leader" in appointment) {
+    const appointee = state.podMembers.find((candidate) => candidate.member === appointment.leader && candidate.pod === pod.name);
+    if (appointee === undefined) throw new Error("appointee " + appointment.leader + " is not a current roster member of pod " + pod.name);
+    appointLeader(state, pod, appointee);
+    appendAwarenessEvent(state, "leader-promoted", { pod: pod.name, member: appointee.member });
+    return { pod, member: appointee, tokens: {} };
+  }
+
+  const memberName = validateMemberName(appointment.member, "appointee member");
+  if (memberName === ORCHESTRATOR_MEMBER) throw new Error("member name orchestrator is reserved and cannot join a pod roster");
+  const existingMember = state.podMembers.find((candidate) => candidate.member === memberName);
+  if (existingMember !== undefined) throw new Error("member " + memberName + " already belongs to pod " + existingMember.pod + "; membership is exclusive");
+  const rosterSize = state.podMembers.filter((candidate) => candidate.pod === pod.name).length;
+  if (rosterSize >= MAX_ROSTER_SIZE) throw new Error("pod roster already has the maximum of " + MAX_ROSTER_SIZE + " members; close and recreate the pod for a new roster");
+
+  const token = randomBytes(32).toString("hex");
+  const hash = tokenHash(token);
+  const registered = state.memberTokens[memberName];
+  if (registered !== undefined && registered !== hash) {
+    throw new Error("roster member " + memberName + " is already registered with a different token; pod appointment aborted, pick another name");
+  }
+  const member: PodMember = {
+    member: memberName,
+    pod: pod.name,
+    role: "worker",
+    process: null,
+    registeredAt: new Date().toISOString(),
+    diedAt: null,
+    doneAt: null,
+  };
+  state.memberTokens[memberName] = hash;
+  state.podMembers.push(member);
+  if (appointment.succession) pod.succession.push(memberName);
+  appendAwarenessEvent(state, "member-appointed", { pod: pod.name, member: memberName });
+  if (appointment.role === "leader") {
+    appointLeader(state, pod, member);
+    appendAwarenessEvent(state, "leader-promoted", { pod: pod.name, member: member.member });
+  }
+  return { pod, member, tokens: { [memberName]: token } };
+}
+
+function appointLeader(state: CoordinationState, pod: Pod, appointee: PodMember): void {
+  if (appointee.doneAt !== null) throw new Error("appointee " + appointee.member + " has reported done and cannot become pod leader");
+  for (const member of state.podMembers) {
+    if (member.pod === pod.name) member.role = "worker";
+  }
+  appointee.role = "leader";
+  pod.leader = appointee.member;
 }
 
 // ADR 0003 D7: deliberate orchestrator close. Nothing automatic closes a pod.
