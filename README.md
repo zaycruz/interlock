@@ -103,7 +103,7 @@ Name each item `interlock member token <pane>`.
 
 Give the token only to the matching Herdr pane session.
 
-Herdr provisions one token for each pane through `interlock session register`.
+The orchestrator mints one token for each pod member with `interlock pod create`. Store each token in the 1Password team vault as `interlock member token <pane>`. `interlock session register` is for standalone members only.
 
 Interlock stores only the token hash in its state directory.
 
@@ -127,7 +127,7 @@ The adapter reads the shared `$INTERLOCK_STATE_DIR` state directory.
 
 The adapter does not keep a second message or digest store.
 
-Herdr provisions one token per pane with `session register`; the coordination
+The orchestrator mints one token per pane with `interlock pod create`; the coordination
 state stores only token hashes. Mutating commands and pane-scoped inbox reads
 must present the matching token. Pane and task identifiers accept only
 `^[A-Za-z0-9:._-]+$` without `..`.
