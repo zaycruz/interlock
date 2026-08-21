@@ -1,10 +1,10 @@
-import { runCoordinationCli } from "./commands.js";
-import type { CoordinationMessage, CoordinationSession, DigestDelivery } from "./types.js";
+import { runCoordinationCli } from "@raava-solutions/interlock/coordination";
+import type { CoordinationMessage, CoordinationSession, DigestDelivery } from "@raava-solutions/interlock/coordination";
 
 /**
- * The small boundary used by space.js (and the Pi adapter) after it has
- * resolved a destination to a concrete pane. Routing and state ownership stay
- * in Interlock; this module only translates the existing call shapes.
+ * Herdr's pane-shaped transport over Interlock's public coordination CLI.
+ * The engine owns routing and durable state; this adapter only translates
+ * host calls into the public command surface.
  */
 export interface SpaceSendInput {
   fromPane: string;
