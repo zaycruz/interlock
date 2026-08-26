@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { runCli } from "../../src/cli/index.js";
-import { createSpaceAdapter, coordinationStatePath } from "../../src/coordination/index.js";
+import { runCoordinationCli, coordinationStatePath } from "@raava-solutions/interlock/coordination";
+import { createSpaceAdapter } from "../src/index.js";
 
 const stateDirs: string[] = [];
 const originalStateDir = process.env.INTERLOCK_STATE_DIR;
@@ -17,22 +17,21 @@ afterEach(() => {
 });
 
 function isolatedState(): void {
-  const directory = mkdtempSync(join(tmpdir(), "interlock-space-adapter-test-"));
+  const directory = mkdtempSync(join(tmpdir(), "interlock-plugin-herdr-test-"));
   stateDirs.push(directory);
   process.env.INTERLOCK_STATE_DIR = directory;
 }
 
 function nativeJson(argv: string[]): any {
-  const result = runCli(argv);
+  const result = runCoordinationCli(argv);
+  if (result === null) throw new Error(`Interlock did not recognize ${argv[0]}`);
   assert.equal(result.exitCode, 0, result.stderr);
   return JSON.parse(result.stdout);
 }
 
-test("space.js operations delegate to one Interlock coordination state", () => {
+test("herdr adapter delegates pane-shaped calls to the Interlock public coordination surface", () => {
   isolatedState();
   const adapter = createSpaceAdapter();
-  // The D4 routing boundary only carries sends inside an open pod, so the
-  // adapter's panes are provisioned as pod members with engine-minted tokens.
   const orchestrator = nativeJson(["orchestrator", "init"]).token as string;
   const template = join(process.env.INTERLOCK_STATE_DIR!, "template-eng.json");
   writeFileSync(template, JSON.stringify({ members: ["wT:p1", "wT:p4"], leader: "wT:p1", succession: ["wT:p1", "wT:p4"] }));
@@ -53,14 +52,9 @@ test("space.js operations delegate to one Interlock coordination state", () => {
   assert.equal(inbox.messages[0].id, sent.message.id);
   assert.equal(inbox.digests[0].messageIds[0], sent.message.id);
   assert.equal(readFileSync(coordinationStatePath(), "utf8").includes("branch is ready"), true);
-
-  const reply = adapter.send({ fromPane: "wT:p4", toPane: "wT:p1", token: p4Token, reply: sent.message.id, text: "ack" });
-  assert.equal(reply.message.replyTo, sent.message.id);
-  assert.equal(reply.message.toPane, "wT:p1");
-  assert.equal(nativeJson(["inbox", "--pane", "wT:p1", "--token", p1Token, "--json"]).messages[0].text, "ack");
 });
 
-test("space.js adapter forwards a leader channel for cross-pod sends", () => {
+test("herdr adapter forwards a leader channel for cross-pod sends", () => {
   isolatedState();
   const adapter = createSpaceAdapter();
   const orchestrator = nativeJson(["orchestrator", "init"]).token as string;

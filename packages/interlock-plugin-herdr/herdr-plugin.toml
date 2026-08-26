@@ -1,0 +1,6 @@
+id = "raava.interlock-plugin-herdr"
+name = "@raava-solutions/interlock-plugin-herdr"
+version = "0.0.4"
+min_herdr_version = "0.0.0"
+description = "Herdr transport adapter for Interlock coordination."
+platforms = ["linux", "macos"]
