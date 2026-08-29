@@ -31,6 +31,78 @@ interlock dashboard --once
 `dashboard` only reads coordination state. It is the human awareness surface;
 task and message mutations remain agent/CLI operations.
 
+## Agent tools over MCP
+
+Run `interlock-mcp` when your agent host speaks MCP instead of a shell. The
+server exposes exactly five tools: `inbox_list`, `inbox_summary`,
+`inbox_claim`, `inbox_close`, and `message_send`. Each tool calls the same
+coordination engine as the CLI, so token authentication, routing boundaries,
+and the message state machine behave identically through either door.
+
+Follow the pull protocol. Call `inbox_summary` at natural seams; read a
+digest file or call `inbox_list` only when the summary says work is waiting.
+Claim a message before acting, reply with `message_send` and `reply_to`, then
+close it. Sends are quiet: Interlock never interrupts a running agent.
+
+The engine keeps a count-only status file per pane at
+`$INTERLOCK_STATE_DIR/pending/<pane>.json` (for example
+`{"pane":"wT:p4","pending":2,"oldestPendingAt":"...","updatedAt":"..."}`).
+Your host can read that file for an "N pending" nudge. The file never
+contains message text, senders, or topics.
+
+### Wire the server to a host
+
+One server instance serves exactly one pane. Set these variables for the
+server process:
+
+|Variable|Meaning|
+|---|---|
+|`INTERLOCK_PANE`|The pane this server acts as. Required.|
+|`INTERLOCK_PANE_TOKEN`|The pane's bearer token. Same value the CLI passes with `--token`.|
+|`INTERLOCK_STATE_DIR`|The shared state directory. Defaults to the engine default when unset.|
+
+**Warning:** the token is a bearer secret. Pass it only through the host's
+server-environment mechanism. Never put it in a message, a task value, or a
+tracked file.
+
+For Codex, add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.interlock]
+command = "node"
+args = ["/absolute/path/to/interlock/dist/src/mcp/main.js"]
+
+[mcp_servers.interlock.env]
+INTERLOCK_PANE = "wT:p4"
+INTERLOCK_PANE_TOKEN = "<pane-token>"
+INTERLOCK_STATE_DIR = "/path/to/interlock-state"
+```
+
+For Claude Code, add to the project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "interlock": {
+      "command": "node",
+      "args": ["/absolute/path/to/interlock/dist/src/mcp/main.js"],
+      "env": {
+        "INTERLOCK_PANE": "wT:p4",
+        "INTERLOCK_PANE_TOKEN": "<pane-token>",
+        "INTERLOCK_STATE_DIR": "/path/to/interlock-state"
+      }
+    }
+  }
+}
+```
+
+For OMP or any other stdio MCP host, use the same command and environment
+triple. The server starts even when the variables are missing; each tool call
+then fails with the missing variable named.
+
+The MCP surface adds no new authority. A server can only act as its own pane,
+with its own token, under the same rules the CLI enforces.
+
 ## Interlock in Herdr
 
 Use the Herdr adapter when you run Interlock from Herdr panes.
@@ -181,6 +253,12 @@ Known limitations, disclosed plainly:
   leases to a long-lived ancestor (for example its shell) and delay
   stale-session reclamation. Do not rely on PID binding as proof of
   identity.
+- **MCP host configs hold the pane token in plaintext.** Wiring
+  `interlock-mcp` puts `INTERLOCK_PANE_TOKEN` in your host's config file
+  (`~/.codex/config.toml`, `.mcp.json`, or equivalent). Anyone who can read
+  that file can act as that pane. Keep those files out of tracked
+  directories, or point the env value at your secret manager's injection
+  mechanism instead of a literal.
 - **Beads metadata is visible to repo collaborators.** Interlock records
   actor, PID, process start time, and leased repository-relative paths in
   Beads issue metadata. Keep secrets out of paths and identifiers.
