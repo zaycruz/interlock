@@ -13,10 +13,6 @@ export interface McpConfig {
   stateDir?: string;
 }
 
-export interface McpConfigProblems {
-  problems: string[];
-}
-
 export interface McpConfigReading {
   config: McpConfig | null;
   problems: string[];

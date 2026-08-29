@@ -1,7 +1,5 @@
 export { runCoordinationCli, coordinationUsage } from "./commands.js";
 export { appointPod, assertMessageStageTransition, assertSendAllowed, assertTaskStageTransition, AWARENESS_FEED_MAX_EVENTS, CHANNEL_TOPIC_MAX_LENGTH, closeLeaderChannel, closePod, createPod, evaluatePreSend, MAX_PODS_PER_DEPLOYMENT, MAX_ROSTER_SIZE, openLeaderChannel, parsePodTemplate, validateChannelTopic } from "./pods.js";
-export { pendingStatusPath, refreshAllPendingStatus, refreshPendingStatus } from "./pending-status.js";
-export type { PendingStatus } from "./pending-status.js";
 export { buildDashboardView, renderDashboard } from "./render.js";
 export { assertMemberToken, assertOrchestratorToken, coordinationDeliveryDir, coordinationLockPath, coordinationStateDir, coordinationStatePath, emptyCoordinationState, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeCoordinationState, writeDigestDeliveryFile } from "./state.js";
 export { validateCoordinationName, validateMemberName, validateMemberToken, validatePaneName, validateTaskId } from "./validation.js";

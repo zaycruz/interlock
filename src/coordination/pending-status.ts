@@ -18,7 +18,7 @@ export interface PendingStatus {
   updatedAt: string;
 }
 
-export function pendingStatusPath(pane: string): string {
+function pendingStatusPath(pane: string): string {
   // Pane names are filesystem-safe by construction — validateCoordinationName
   // restricts the charset and rejects '..' — so the name needs no escaping.
   return join(coordinationPendingDir(), `${pane}.json`);

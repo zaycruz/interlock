@@ -10,5 +10,5 @@ import { createInterlockMcpServer } from "./server.js";
 const { config, problems } = readMcpConfig(process.env);
 for (const problem of problems) process.stderr.write("interlock-mcp: " + problem + "\n");
 
-const server = createInterlockMcpServer(config, problems, process.env.INTERLOCK_MCP_VERSION ?? "0.0.0");
+const server = createInterlockMcpServer(config, problems);
 await server.connect(new StdioServerTransport());
