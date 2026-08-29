@@ -24,7 +24,8 @@
     }
   },
   "bin": {
-    "interlock": "./dist/src/cli/main.js"
+    "interlock": "./dist/src/cli/main.js",
+    "interlock-mcp": "./dist/src/mcp/main.js"
   },
   "files": [
     "dist/src"
@@ -33,12 +34,14 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/core/*.test.js dist/test/contracts/*.test.js dist/test/cli/*.test.js dist/test/beads/*.test.js dist/test/coordination/*.test.js",
+    "test": "npm run build && node --test dist/test/core/*.test.js dist/test/contracts/*.test.js dist/test/cli/*.test.js dist/test/beads/*.test.js dist/test/coordination/*.test.js dist/test/mcp/*.test.js",
     "test:core": "npm run build && node --test dist/test/core/*.test.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "13.0.3",
-    "unicode-case-folding": "1.1.1"
+    "unicode-case-folding": "1.1.1",
+    "zod": "^4.5.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

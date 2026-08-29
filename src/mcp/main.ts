@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+// U2/U3: the `interlock-mcp` bin. Reads the pane binding from the host env,
+// starts the server leniently, and binds stdio — the transport every target
+// host (Codex, Claude Code, OMP) supports without extra plugins.
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { readMcpConfig } from "./config.js";
+import { createInterlockMcpServer } from "./server.js";
+
+const { config, problems } = readMcpConfig(process.env);
+for (const problem of problems) process.stderr.write("interlock-mcp: " + problem + "\n");
+
+// The package version ships next to dist/ in both repo and installed
+// layouts; if the read ever fails the server still starts (lenient posture)
+// with an obviously-placeholder version.
+let packageVersion = "0.0.0";
+try {
+  packageVersion = (JSON.parse(readFileSync(fileURLToPath(new URL("../../../package.json", import.meta.url)), "utf8")) as { version: string }).version;
+} catch { /* keep the placeholder */ }
+const server = createInterlockMcpServer(config, problems, packageVersion);
+await server.connect(new StdioServerTransport());
