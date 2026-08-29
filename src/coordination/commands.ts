@@ -6,6 +6,7 @@ import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationSt
 import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, MessageStage, SessionState, TaskStage } from "./types.js";
 import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
 import { sessionProcessIdentityFor } from "../core/process-identity.js";
+import { refreshAllPendingStatus, refreshPendingStatus } from "./pending-status.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
@@ -350,11 +351,13 @@ function sendCommand(argv: string[]): string {
     const id = state.nextMessageId++;
     const now = new Date().toISOString();
     const message: CoordinationMessage = { id, threadId: parent?.threadId ?? id, replyTo: replyTo ?? null, fromPane, toPane, workspace: optional(parsed, "workspace"), text: required(parsed, "text"), state: "queued", claimer: null, createdAt: now };
+    let parentHandoff = false;
     if (parent && (parent.state === "queued" || parent.state === "claimed")) {
       // A reply hands the thread back: the parent moves queued/claimed ->
       // handled, which the message matrix already permits.
       assertMessageStageTransition(parent.id, parent.state, "handled");
       parent.state = "handled";
+      parentHandoff = true;
     }
     state.messages.push(message);
     // The send cleared the boundary: a channel send counts toward the channel's
@@ -364,6 +367,11 @@ function sendCommand(argv: string[]): string {
       channel.messageCount += 1;
     }
     const digests = deliverDigests(state, "watcher-heartbeat");
+    // U1: refresh the nudge inside the lock, after every mutation, so the
+    // file can never carry a count the state did not commit. A reply that
+    // handed the thread back also shrank the sender's pending set.
+    refreshPendingStatus(state, toPane);
+    if (parentHandoff) refreshPendingStatus(state, fromPane);
     return { message, digests };
     // commitOnThrow: a rejected send can still carry a verified leader death
     // and promotion, which must be committed (see withCoordinationLock).
@@ -390,6 +398,7 @@ function inboxCommand(argv: string[]): string {
       if (found.toPane !== pane) throw new Error(`message #${id} is not addressed to ${pane}`);
       assertMessageStageTransition(found.id, found.state, target);
       found.state = target;
+      refreshPendingStatus(state, pane);
       return { ...found };
     });
     return JSON.stringify({ ok: true, message: result });
@@ -461,6 +470,10 @@ function watchCommand(argv: string[]): string {
     // alongside the lazy pre-send evaluation in evaluatePreSend.
     for (const pod of state.pods) evaluateSuccession(state, pod.leader);
     const digests = deliverDigests(state, "watcher-heartbeat");
+    // U1: the sweep doubles as the pending-status repair path — it restores a
+    // file lost to any cause and gives every registered pane (zero-count
+    // included) its first record, satisfying R9's registration coverage.
+    refreshAllPendingStatus(state);
     return { heartbeatAt: state.lastWatchAt, digests };
   });
   return JSON.stringify({ ok: true, digested: result.digests.length, messageIds: result.digests.flatMap((digest) => digest.messageIds), ...result });

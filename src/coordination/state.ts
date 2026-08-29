@@ -28,6 +28,7 @@ export function coordinationStateDir(): string {
 export function coordinationStatePath(): string { return join(coordinationStateDir(), "state.json"); }
 export function coordinationLockPath(): string { return join(coordinationStateDir(), "state.lock"); }
 export function coordinationDeliveryDir(): string { return join(coordinationStateDir(), "deliveries"); }
+export function coordinationPendingDir(): string { return join(coordinationStateDir(), "pending"); }
 
 export function emptyCoordinationState(): CoordinationState {
   return {
