@@ -89,7 +89,11 @@ function podCommand(argv: string[]): string {
     const orchestratorToken = required(parsed, "orchestrator-token");
     const closed = withCoordinationLock((state) => {
       assertOrchestratorToken(state, orchestratorToken);
-      return closePod(state, name);
+      const result = closePod(state, name);
+      // Closing deregisters members; converge the nudge files now so no
+      // dead pane advertises pending work until the next watch.
+      refreshAllPendingStatus(state);
+      return result;
     });
     return JSON.stringify({ ok: true, ...closed });
   }

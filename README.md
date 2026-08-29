@@ -46,7 +46,7 @@ close it. Sends are quiet: Interlock never interrupts a running agent.
 
 The engine keeps a count-only status file per pane at
 `$INTERLOCK_STATE_DIR/pending/<pane>.json` (for example
-`{"pane":"wT:p4","pending":2,"oldestPendingAt":"...","updatedAt":"..."}`).
+`{"version":1,"pane":"wT:p4","pending":2,"oldestPendingAt":"...","updatedAt":"..."}`).
 Your host can read that file for an "N pending" nudge. The file never
 contains message text, senders, or topics.
 

@@ -5,7 +5,7 @@
 // sweep repairs it. Content rule: counts and timestamps only — never message
 // text, senders, or topics (R9-R13, R11/AE5).
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -20,6 +20,7 @@ afterEach(() => {
   if (originalStateDir === undefined) delete process.env.INTERLOCK_STATE_DIR;
   else process.env.INTERLOCK_STATE_DIR = originalStateDir;
   paneTokens.clear();
+  for (const key of Object.keys(orchestratorTokens)) delete orchestratorTokens[key];
   while (stateDirs.length > 0) rmSync(stateDirs.pop()!, { recursive: true, force: true });
 });
 
@@ -35,8 +36,16 @@ function json(result: ReturnType<typeof runCli>): any {
   return JSON.parse(result.stdout);
 }
 
+// orchestrator init prints its token once; cache it per isolated state dir.
+const orchestratorTokens: Record<string, string> = {};
+function orchestratorToken(): string {
+  const directory = process.env.INTERLOCK_STATE_DIR!;
+  if (orchestratorTokens[directory] === undefined) orchestratorTokens[directory] = json(runCli(["orchestrator", "init"])).token as string;
+  return orchestratorTokens[directory];
+}
+
 function registerPod(pod: string, members: string[]): void {
-  const orchestrator = json(runCli(["orchestrator", "init"])).token as string;
+  const orchestrator = orchestratorToken();
   const template = join(process.env.INTERLOCK_STATE_DIR!, `template-${pod}.json`);
   writeFileSync(template, JSON.stringify({ members, leader: members[0], succession: [...members] }));
   const created = json(runCli(["pod", "create", "--name", pod, "--template", template, "--orchestrator-token", orchestrator]));
@@ -53,6 +62,11 @@ function pendingFile(pane: string): string {
 
 function readPending(pane: string): any {
   return JSON.parse(readFileSync(pendingFile(pane), "utf8"));
+}
+
+function listPendingDir(): string[] {
+  const dir = join(process.env.INTERLOCK_STATE_DIR!, "pending");
+  return existsSync(dir) ? readdirSync(dir) : [];
 }
 
 // AE1: a quiet arrival moves the recipient's count without any interrupt.
@@ -142,6 +156,47 @@ test("the watch sweep repairs a lost file and covers every registered pane with 
   assert.equal(readPending("wT:p9").pending, 0, "registered pane without mail gets a zero-count file");
   // The orchestrator is a deployment identity, not a pane; it never gets a file.
   assert.equal(existsSync(pendingFile("orchestrator")), false);
+});
+
+// A closed pod's members keep their messages as history, so a leftover nudge
+// file would advertise pending work for a pane that can never authenticate
+// again. The sweep converges the directory, not just registered panes.
+test("the sweep removes nudge files for panes that are no longer registered", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p4"]);
+  registerPod("ops", ["wT:p9"]);
+  json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "unread at close"], "wT:p1"));
+  assert.equal(readPending("wT:p4").pending, 1);
+
+  json(runCli(["pod", "close", "--pod", "eng", "--orchestrator-token", orchestratorToken()]));
+
+  json(runCli(["watch", "--once"]));
+  assert.equal(listPendingDir().includes("wT:p4.json"), false, "deregistered pane file removed");
+  assert.equal(existsSync(pendingFile("wT:p1")), false, "deregistered sender has no file either");
+  assert.equal(readPending("wT:p9").pending, 0, "registered panes still converge");
+});
+
+// The sweep must survive junk in pending/: a directory entry (rm on a
+// directory throws EISDIR and would brick every watch), an entry whose name
+// could never be a pane, and a tmp file left by a crash between write and
+// rename. The engine is the only intended writer; tolerate anything else.
+test("the sweep tolerates non-file entries, invalid names, and stale tmp files", () => {
+  const directory = isolatedState();
+  registerPod("eng", ["wT:p1"]);
+  json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p1", "--text", "loop"], "wT:p1"));
+
+  const pendingDir = join(directory, "pending");
+  mkdirSync(join(pendingDir, "evil.json"));
+  writeFileSync(join(pendingDir, "not a pane.json"), "{}");
+  writeFileSync(pendingFile("wT:p1") + ".tmp.999999", "{}");
+
+  json(runCli(["watch", "--once"]));
+
+  assert.equal(readPending("wT:p1").pending, 1, "watch still converges registered panes");
+  const entries = listPendingDir();
+  assert.ok(entries.includes("evil.json"), "the foreign directory survives untouched");
+  assert.equal(entries.includes("not a pane.json"), false, "unparseable record removed");
+  assert.equal(entries.some((entry) => entry.includes(".tmp.")), false, "stale tmp file removed");
 });
 
 test("compact removes terminal messages and the pending count stays correct", () => {

@@ -23,6 +23,9 @@ export type ToolHandler = (args: Record<string, unknown>) => ToolResult;
 // the engine's INTERLOCK_PANE_TOKEN fallback (never argv — argv is world-
 // readable via ps). The write is scoped to the synchronous call and restored
 // so the server never leaks one pane's identity into another's process env.
+// INVARIANT: `run` MUST stay synchronous end-to-end. process.env is
+// process-global; an async handler that awaits inside this window would let
+// a concurrent tools/call observe or overwrite another pane's env.
 function withPaneEnv<T>(config: McpConfig, run: () => T): T {
   const savedToken = process.env.INTERLOCK_PANE_TOKEN;
   const savedStateDir = process.env.INTERLOCK_STATE_DIR;
