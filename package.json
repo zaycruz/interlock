@@ -37,8 +37,10 @@
     "test:core": "npm run build && node --test dist/test/core/*.test.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "13.0.3",
-    "unicode-case-folding": "1.1.1"
+    "unicode-case-folding": "1.1.1",
+    "zod": "^4.5.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
