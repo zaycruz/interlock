@@ -13,7 +13,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TOOL_SPECS } from "./tools.js";
 import type { McpConfig } from "./config.js";
 
-export function createInterlockMcpServer(config: McpConfig | null, problems: string[] = [], version = "0.0.0"): McpServer {
+export function createInterlockMcpServer(config: McpConfig | null, problems: string[], version: string): McpServer {
   const server = new McpServer({ name: "interlock", version });
   for (const spec of TOOL_SPECS) {
     server.registerTool(spec.name, { description: spec.description, inputSchema: spec.schema }, async (args: Record<string, unknown>) => {

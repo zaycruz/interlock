@@ -31,8 +31,16 @@ export function readMcpConfig(env: NodeJS.ProcessEnv): McpConfigReading {
     }
   }
   if (problems.length > 0) return { config: null, problems };
-  // INTERLOCK_PANE_TOKEN and INTERLOCK_STATE_DIR stay optional here: the
-  // engine gives the first its --token-fallback error and the second its
-  // default state dir. Surfacing those per call is the engine's job.
-  return { config: { pane: pane!, token: env.INTERLOCK_PANE_TOKEN, stateDir: env.INTERLOCK_STATE_DIR }, problems: [] };
+  // Empty-string env values are the shell/docker convention for "unset";
+  // normalizing them here keeps the engine from receiving a blank state dir
+  // (cryptic `mkdir ''` per call) and gives the token fallback its chance.
+  const blank = (value: string | undefined): boolean => value === undefined || value.trim() === "";
+  return {
+    config: {
+      pane: pane!,
+      token: blank(env.INTERLOCK_PANE_TOKEN) ? undefined : env.INTERLOCK_PANE_TOKEN,
+      stateDir: blank(env.INTERLOCK_STATE_DIR) ? undefined : env.INTERLOCK_STATE_DIR,
+    },
+    problems: [],
+  };
 }

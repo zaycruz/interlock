@@ -158,6 +158,73 @@ test("the watch sweep repairs a lost file and covers every registered pane with 
   assert.equal(existsSync(pendingFile("orchestrator")), false);
 });
 
+// The nudge's aging signal: oldestPendingAt must be the OLDEST pending
+// message and must advance when that message is closed. Every other test
+// keeps at most one message pending, which cannot tell min from max.
+test("oldestPendingAt tracks the oldest pending message and advances when it closes", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p4"]);
+  const first = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "older"], "wT:p1")).message;
+  // createdAt has millisecond resolution; force the second send into a later tick.
+  while (Date.now() <= Date.parse(first.createdAt)) { /* spin */ }
+  const second = json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "newer"], "wT:p1")).message;
+  assert.notEqual(first.createdAt, second.createdAt, "timestamps must be distinguishable");
+
+  assert.equal(readPending("wT:p4").pending, 2);
+  assert.equal(readPending("wT:p4").oldestPendingAt, first.createdAt, "oldest wins, not newest");
+
+  authorized(["inbox", "claim", "--message", String(first.id), "--pane", "wT:p4"], "wT:p4");
+  authorized(["inbox", "close", "--message", String(first.id), "--pane", "wT:p4"], "wT:p4");
+  assert.equal(readPending("wT:p4").pending, 1);
+  assert.equal(readPending("wT:p4").oldestPendingAt, second.createdAt, "oldest advances to the survivor");
+
+  // Sweep repair must preserve the same derivation.
+  unlinkSync(pendingFile("wT:p4"));
+  json(runCli(["watch", "--once"]));
+  assert.equal(readPending("wT:p4").oldestPendingAt, second.createdAt, "repair recomputes, not restores");
+});
+
+// The orchestrator is a deployment identity, not a pane: even a legal
+// leader reply routed back to it (toPane = parent.fromPane) must never
+// materialize pending/orchestrator.json.
+test("a reply routed back to the orchestrator never materializes its record", () => {
+  isolatedState();
+  registerPod("eng", ["wT:p1", "wT:p4"]);
+  const orchestrator = orchestratorToken();
+  const sent = json(runCli(["send", "--from-pane", "orchestrator", "--to-pane", "wT:p1", "--text", "directive", "--token", orchestrator])).message;
+  authorized(["send", "--from-pane", "wT:p1", "--reply", String(sent.id), "--text", "ack"], "wT:p1");
+  assert.equal(existsSync(pendingFile("orchestrator")), false, "the reply must not create an orchestrator record");
+  json(runCli(["watch", "--once"]));
+  assert.equal(existsSync(pendingFile("orchestrator")), false, "and the sweep must not invent one");
+});
+
+// A non-directory planted at the pending path must not permanently wedge
+// watch and pod close (ENOTDIR/EEXIST previously bricked every later call).
+test("a file planted at the pending path self-heals on the next sweep", () => {
+  const directory = isolatedState();
+  registerPod("eng", ["wT:p1"]);
+  mkdirSync(join(directory, "pending"));
+  json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p1", "--text", "seed"], "wT:p1"));
+  rmSync(join(directory, "pending"), { recursive: true });
+  writeFileSync(join(directory, "pending"), "planted");
+
+  json(runCli(["watch", "--once"]));
+  assert.equal(readPending("wT:p1").pending, 1, "the sweep removes the foreign file and restores the directory");
+});
+
+// A pane legally named with ".tmp." inside keeps its own record: the stale
+// temp predicate is anchored to the `<x>.json.tmp.` shape, not any ".tmp.".
+test("a pane named with .tmp. inside keeps its record across sweeps", () => {
+  const directory = isolatedState();
+  registerPod("eng", ["wT:p1", "run.tmp.2"]);
+  json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "run.tmp.2", "--text", "dotted pane"], "wT:p1"));
+  json(runCli(["watch", "--once"]));
+  assert.equal(readPending("run.tmp.2").pending, 1);
+  json(runCli(["watch", "--once"]));
+  assert.equal(existsSync(pendingFile("run.tmp.2")), true, "sweeps never churn a registered pane's record");
+  assert.equal(listPendingDir().some((entry) => entry.includes(".json.tmp.")), false, "real temp files still get GC'd");
+});
+
 // A closed pod's members keep their messages as history, so a leftover nudge
 // file would advertise pending work for a pane that can never authenticate
 // again. The sweep converges the directory, not just registered panes.

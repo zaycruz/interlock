@@ -371,11 +371,15 @@ function sendCommand(argv: string[]): string {
       channel.messageCount += 1;
     }
     const digests = deliverDigests(state, "watcher-heartbeat");
-    // U1: refresh the nudge inside the lock, after every mutation, so the
-    // file can never carry a count the state did not commit. A reply that
-    // handed the thread back also shrank the sender's pending set.
-    refreshPendingStatus(state, toPane);
-    if (parentHandoff) refreshPendingStatus(state, fromPane);
+    // U1: refresh the nudges inside the lock, after every mutation, so the
+    // file can never carry a count the state did not commit — but as the
+    // advisory channel R13 defines it: a failed record write must never
+    // fail the send (state is already committed here with commitOnThrow),
+    // so each refresh is best-effort and the next sweep repairs. A reply
+    // that handed the thread back also shrank the replying pane's set.
+    // The orchestrator is a deployment identity, not a pane: never a record.
+    if (toPane !== ORCHESTRATOR_MEMBER) { try { refreshPendingStatus(state, toPane); } catch { /* sweep repairs */ } }
+    if (parentHandoff && fromPane !== ORCHESTRATOR_MEMBER) { try { refreshPendingStatus(state, fromPane); } catch { /* sweep repairs */ } }
     return { message, digests };
     // commitOnThrow: a rejected send can still carry a verified leader death
     // and promotion, which must be committed (see withCoordinationLock).
@@ -402,7 +406,7 @@ function inboxCommand(argv: string[]): string {
       if (found.toPane !== pane) throw new Error(`message #${id} is not addressed to ${pane}`);
       assertMessageStageTransition(found.id, found.state, target);
       found.state = target;
-      refreshPendingStatus(state, pane);
+      if (pane !== ORCHESTRATOR_MEMBER) { try { refreshPendingStatus(state, pane); } catch { /* sweep repairs */ } }
       return { ...found };
     });
     return JSON.stringify({ ok: true, message: result });
@@ -534,7 +538,10 @@ function deliverDigests(state: CoordinationState, reason: DigestDelivery["reason
 
 function findTask(state: CoordinationState, id: string): CoordinationTask { const task = state.tasks.find((candidate) => candidate.id === id); if (!task) throw new Error(`unknown task ${id}`); return task; }
 function ownedTask(state: CoordinationState, id: string, pane: string): CoordinationTask { const task = findTask(state, id); if (task.claimer !== pane) throw new Error(`task ${id} is owned by ${task.claimer ?? "nobody"}; pane ${pane} cannot mutate it`); return task; }
-function parseArgs(argv: string[]): Map<string, string | true> { const values = new Map<string, string | true>(); for (let index = 0; index < argv.length; index += 1) { const value = argv[index]!; if (!value.startsWith("--")) { values.set(`$${index}`, value); continue; } const name = value.slice(2); const next = argv[index + 1]; if (next !== undefined && !next.startsWith("--")) { values.set(name, next); index += 1; } else values.set(name, true); } return values; }
+// `--name=value` is a distinct accepted form: a value that itself starts
+// with `--` (legal message text like "--reply 1") survives as the flag's
+// value instead of being re-classified as a following flag.
+function parseArgs(argv: string[]): Map<string, string | true> { const values = new Map<string, string | true>(); for (let index = 0; index < argv.length; index += 1) { const value = argv[index]!; if (!value.startsWith("--")) { values.set(`$${index}`, value); continue; } const eq = value.indexOf("="); if (eq > 2) { values.set(value.slice(2, eq), value.slice(eq + 1)); continue; } const name = value.slice(2); const next = argv[index + 1]; if (next !== undefined && !next.startsWith("--")) { values.set(name, next); index += 1; } else values.set(name, true); } return values; }
 function required(values: Map<string, string | true>, name: string): string { const value = values.get(name); if (typeof value !== "string" || value.trim() === "") throw new Error(`--${name} is required`); return value; }
 function optional(values: Map<string, string | true>, name: string): string | null { const value = values.get(name); return typeof value === "string" && value.trim() !== "" ? value : null; }
 function requiredToken(values: Map<string, string | true>): string { const value = optional(values, "token") ?? process.env.INTERLOCK_PANE_TOKEN; if (value === undefined || value.trim() === "") throw new Error("--token is required (or set INTERLOCK_PANE_TOKEN)"); return value; }

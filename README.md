@@ -78,6 +78,10 @@ INTERLOCK_PANE_TOKEN = "<pane-token>"
 INTERLOCK_STATE_DIR = "/path/to/interlock-state"
 ```
 
+Codex supports per-tool `approval_mode`. Gate the write tools
+(`message_send`, `inbox_claim`, `inbox_close`) if you want a human to
+approve every send or close the agent attempts.
+
 For Claude Code, add to the project's `.mcp.json`:
 
 ```json
@@ -99,6 +103,10 @@ For Claude Code, add to the project's `.mcp.json`:
 For OMP or any other stdio MCP host, use the same command and environment
 triple. The server starts even when the variables are missing; each tool call
 then fails with the missing variable named.
+
+To surface a nudge, read `pending/<pane>.json` and display `pending` with the
+age derived from `oldestPendingAt`. Treat a missing file as zero pending —
+absence means the pane was never swept, not that work is waiting.
 
 The MCP surface adds no new authority. A server can only act as its own pane,
 with its own token, under the same rules the CLI enforces.

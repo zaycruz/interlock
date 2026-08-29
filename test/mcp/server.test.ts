@@ -18,6 +18,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { runCli } from "../../src/cli/index.js";
 import { createInterlockMcpServer } from "../../src/mcp/server.js";
+import { readMcpConfig } from "../../src/mcp/config.js";
+import { engineRunner } from "../../src/mcp/tools.js";
 import type { McpConfig } from "../../src/mcp/config.js";
 
 const stateDirs: string[] = [];
@@ -77,7 +79,7 @@ function bootPod(pod: string, members: string[]): Record<string, McpConfig> {
 async function connect(config: McpConfig): Promise<Client> {
   const client = new Client({ name: "interlock-test", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createInterlockMcpServer(config);
+  const server = createInterlockMcpServer(config, [], "0.0.0");
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return client;
 }
@@ -176,9 +178,25 @@ test("inbox_summary counts pending and lists digests without message bodies", as
   const digests = list(summary.digests).map(record);
   assert.equal(digests.length, 1);
   assert.equal(digests[0]!.reason, "agent-idle");
-  assert.deepEqual(digests[0]!.messageIds, [1]);
+  assert.equal(digests[0]!.messageCount, 1, "summary carries counts, not id sets");
   const raw = JSON.stringify(summary);
   assert.equal(raw.includes("QWERTY-body-must-not-leak"), false, "summary is pointer-shaped: counts, ids, files — never bodies");
+});
+
+// The pending count must exclude terminal states: a pane whose threads are
+// all handled/closed reports zero, never a permanent phantom.
+test("inbox_summary pending excludes handled and closed messages", async () => {
+  isolatedState();
+  const configs = bootPod("eng", ["wT:p1", "wT:p4"]);
+  const sender = await connect(configs["wT:p1"]!);
+  const recipient = await connect(configs["wT:p4"]!);
+  const first = record(payload(await callTool(sender, "message_send", { to: "wT:p4", text: "will close" })).message);
+  await callTool(sender, "message_send", { to: "wT:p4", text: "stays queued" });
+  await callTool(recipient, "inbox_claim", { message: first.id });
+  await callTool(recipient, "inbox_close", { message: first.id });
+
+  const summary = payload(await callTool(recipient, "inbox_summary", {}));
+  assert.equal(summary.pending, 1, "only the queued message counts");
 });
 
 // AE3: a failed call changes nothing, byte for byte — including the pending
@@ -252,4 +270,84 @@ test("the stdio bin answers initialize and tools/list", async () => {
   const body = payload(await callTool(client, "inbox_list", {}));
   assert.equal(list(body.messages).length, 1, "the seeded send is visible over stdio");
   await client.close();
+});
+// KTD5 start-lenient: missing/invalid INTERLOCK_PANE never exits; tools/list
+// still answers and every call fails naming the variable.
+async function connectUnconfigured(problems: string[]): Promise<Client> {
+  const client = new Client({ name: "interlock-test", version: "0.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createInterlockMcpServer(null, problems, "0.0.0");
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return client;
+}
+
+test("readMcpConfig surfaces problems without throwing and normalizes blank env", () => {
+  const missing = readMcpConfig({});
+  assert.equal(missing.config, null);
+  assert.match(missing.problems.join(";"), /INTERLOCK_PANE is not set/);
+
+  const invalid = readMcpConfig({ INTERLOCK_PANE: "../escape" });
+  assert.equal(invalid.config, null);
+  assert.match(invalid.problems.join(";"), /INTERLOCK_PANE is invalid/);
+
+  // Empty-string env values (docker/shell "unset" convention) are treated
+  // as absent, not forwarded to the engine as a blank state dir.
+  const blanks = readMcpConfig({ INTERLOCK_PANE: "p1", INTERLOCK_PANE_TOKEN: "", INTERLOCK_STATE_DIR: "  " });
+  assert.deepEqual(blanks.config, { pane: "p1", token: undefined, stateDir: undefined });
+});
+
+test("an unconfigured server still lists tools and fails each call by name", async () => {
+  const { problems } = readMcpConfig({});
+  const client = await connectUnconfigured(problems);
+  const tools = await client.listTools();
+  assert.equal(tools.tools.length, 5, "tools/list works during host setup");
+  const text = errorText(await callTool(client, "inbox_summary", {}));
+  assert.match(text, /INTERLOCK_PANE is not set/);
+});
+
+// The branch's threat model names ps-visible argv; this is the mechanical
+// gate: every engine call the server produces must authenticate via env only.
+test("no engine call ever carries the token in argv", async () => {
+  isolatedState();
+  const configs = bootPod("eng", ["wT:p1", "wT:p4"]);
+  const real = engineRunner.run;
+  const seen: string[][] = [];
+  engineRunner.run = ((argv: string[]) => { seen.push([...argv]); return real(argv); }) as typeof real;
+  try {
+    const sender = await connect(configs["wT:p1"]!);
+    await callTool(sender, "message_send", { to: "wT:p4", text: "argv check" });
+    const recipient = await connect(configs["wT:p4"]!);
+    await callTool(recipient, "inbox_list", {});
+  } finally {
+    engineRunner.run = real;
+  }
+  assert.ok(seen.length >= 2, "send + inbox calls captured");
+  for (const argv of seen) {
+    assert.equal(argv.includes("--token"), false, "token must never reach argv: " + argv.join(" "));
+    assert.equal(argv.some((part) => part.includes(configs["wT:p1"]!.token!)), false, "token value must never reach argv");
+  }
+});
+
+// withPaneEnv must restore the token half too — a leaked token would let a
+// later tokenless config silently authenticate as the leaked pane.
+test("the server restores the token env after every call", async () => {
+  isolatedState();
+  const configs = bootPod("eng", ["wT:p1", "wT:p4"]);
+  delete process.env.INTERLOCK_PANE_TOKEN;
+  const client = await connect(configs["wT:p4"]!);
+  await callTool(client, "inbox_list", {});
+  assert.equal(process.env.INTERLOCK_PANE_TOKEN, undefined, "no token residue in server env");
+  // A tokenless config in the same process must still fail auth (it would
+  // have authenticated as the leaked pane if the env write stuck).
+  const bare = await connect({ pane: "wT:p4", stateDir: process.env.INTERLOCK_STATE_DIR });
+  assert.ok(errorText(await callTool(bare, "inbox_list", {})).length > 0);
+});
+
+// A message body that itself starts with `--` is legal text, not a flag.
+test("message_send delivers dash-prefixed text verbatim", async () => {
+  isolatedState();
+  const configs = bootPod("eng", ["wT:p1", "wT:p4"]);
+  const sender = await connect(configs["wT:p1"]!);
+  const sent = payload(await callTool(sender, "message_send", { to: "wT:p4", text: "--reply 1 --channel 9" }));
+  assert.equal(record(sent.message).text, "--reply 1 --channel 9");
 });

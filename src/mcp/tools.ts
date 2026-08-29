@@ -41,8 +41,13 @@ function withPaneEnv<T>(config: McpConfig, run: () => T): T {
   }
 }
 
+// Seam for the token-argv regression test: every engine call flows through
+// this indirection so a test can capture the exact argv arrays the server
+// produces and assert none carries --token. Tests restore the real runner.
+export const engineRunner: { run: typeof runCoordinationCli } = { run: runCoordinationCli };
+
 function invoke(config: McpConfig, argv: string[]): ToolResult {
-  const result = withPaneEnv(config, () => runCoordinationCli(argv));
+  const result = withPaneEnv(config, () => engineRunner.run(argv));
   if (result === null) throw new Error("not a coordination command: " + argv.join(" "));
   if (result.exitCode !== 0) return { isError: true, content: [{ type: "text", text: result.stderr.trim() === "" ? "coordination CLI failed" : result.stderr.trim() }] };
   return { content: [{ type: "text", text: result.stdout }] };
@@ -84,7 +89,8 @@ function inboxSummaryHandler(config: McpConfig): ToolHandler {
     if (listed.isError) return listed;
     const parsed = JSON.parse(listed.content[0]!.text) as { pane: string; messages: { state: string }[]; digests: { id: number; messageIds: number[]; reason: string; file: string }[] };
     const pending = parsed.messages.filter((message) => message.state === "queued" || message.state === "claimed").length;
-    const digests = parsed.digests.map((digest) => ({ id: digest.id, messageIds: digest.messageIds, reason: digest.reason, file: digest.file }));
+    // messageCount, never the id set: the summary stays pointer-shaped (R12).
+    const digests = parsed.digests.map((digest) => ({ id: digest.id, messageCount: digest.messageIds.length, reason: digest.reason, file: digest.file }));
     return { content: [{ type: "text", text: JSON.stringify({ ok: true, pane: parsed.pane, pending, digests }, null, 2) }] };
   };
 }
@@ -99,7 +105,9 @@ function inboxMutationHandler(config: McpConfig, action: "claim" | "close"): Too
 
 function messageSendHandler(config: McpConfig): ToolHandler {
   return (args) => {
-    const argv = ["send", "--from-pane", config.pane, "--text", textArg(args, "text")];
+    // `--text=` (equals form) so a body that itself starts with `--` is
+    // delivered verbatim instead of being re-classified as a CLI flag.
+    const argv = ["send", "--from-pane", config.pane, "--text=" + textArg(args, "text")];
     const to = optionalTextArg(args, "to");
     if (to !== undefined) argv.push("--to-pane", to);
     const replyTo = numberArg(args, "reply_to");

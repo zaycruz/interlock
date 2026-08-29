@@ -290,3 +290,16 @@ Reading the diagram: message content flows only into the durable queue and out t
 - `docs/adr/0002-host-adapter-boundary.md` — the boundary direction (engine never imports adapters; adapters import the engine) checked against KTD1: bundling `src/mcp/` respects it because the import arrow points engine-ward only.
 - `README.md` — "Security and threat model" (bearer-token rules, plaintext state at rest, first-registration squatting) is the baseline U3's addendum extends; the Herdr install/check/provision sections are the documentation style reference.
 - `docs/brainstorms/2026-08-29-agent-inbox-mcp-requirements.md` — origin R1–R15, A1–A4, F1–F3, AE1–AE7, key decisions, and the deferred-to-planning questions this plan resolves as KTD1–KTD7.
+
+---
+
+## Addendum — shipped deviations (2026-08-29, post-review)
+
+Adversarial review after U1–U3 found the implementation diverging from KTD4's pinned inventory in two deliberate, better ways; they are recorded here so this plan stays the contract the next reader trusts:
+
+1. **Fourth refresh site — `pod close`.** Closing a pod deregisters its members; without an inline `refreshAllPendingStatus(state)` inside the close lock, dead panes keep advertising pending work until the next watch sweep. The call sits in the same critical section as the deregistration it repairs, so it adds no new lock.
+2. **The watch sweep converges the directory; it does not merely rewrite.** Beyond refreshing registered panes, it removes leftover regular files (deregistered panes, `orchestrator.json`, stale `<pane>.json.tmp.<pid>` temp files) and self-heals a foreign non-directory planted at `pending/` or a path entry. Non-file entries are skipped, never deleted (rmSync on a directory throws EISDIR inside the lock and would brick every later watch). Every per-pane write is best-effort: the record is advisory (R13), so a failed write never fails send/inbox/close — the next sweep repairs.
+3. **The orchestrator never gets a record, on every path.** The skip lives at the refresh sites themselves (send, reply-handoff, inbox claim/close), so a legal leader reply routed back to `orchestrator` cannot materialize `pending/orchestrator.json`.
+4. **`inbox_summary` projects `messageCount`, not `messageIds`** — strictly fewer references than the pinned shape, keeping the summary pointer-shaped per R12.
+
+Also from review: the coordination CLI now accepts `--name=value` as a flag form, which makes the MCP `message_send` deliver bodies starting with `--` verbatim (no flag smear); `readMcpConfig` normalizes empty-string env values to unset; `interlock-mcp` reports the package version in `initialize`; the token-never-in-argv invariant has a mechanical test (`engineRunner` seam) and `withPaneEnv` token-restore has a functional one.

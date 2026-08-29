@@ -12,6 +12,12 @@ import { createInterlockMcpServer } from "./server.js";
 const { config, problems } = readMcpConfig(process.env);
 for (const problem of problems) process.stderr.write("interlock-mcp: " + problem + "\n");
 
-const packageVersion = (JSON.parse(readFileSync(fileURLToPath(new URL("../../../package.json", import.meta.url)), "utf8")) as { version: string }).version;
+// The package version ships next to dist/ in both repo and installed
+// layouts; if the read ever fails the server still starts (lenient posture)
+// with an obviously-placeholder version.
+let packageVersion = "0.0.0";
+try {
+  packageVersion = (JSON.parse(readFileSync(fileURLToPath(new URL("../../../package.json", import.meta.url)), "utf8")) as { version: string }).version;
+} catch { /* keep the placeholder */ }
 const server = createInterlockMcpServer(config, problems, packageVersion);
 await server.connect(new StdioServerTransport());
