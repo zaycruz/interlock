@@ -1,7 +1,7 @@
 ---
 title: Agent Inbox MCP - Plan
 type: feat
-status: active
+status: completed
 date: 2026-08-29
 origin: docs/brainstorms/2026-08-29-agent-inbox-mcp-requirements.md
 ---
