@@ -70,23 +70,31 @@ export function refreshAllPendingStatus(state: CoordinationState): void {
     // remove it so the refresh loop below can create the real directory.
     rmSync(directory, { force: true });
   }
-  if (existsSync(directory)) {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      const pane = entry.name.endsWith(".json") ? entry.name.slice(0, -".json".length) : null;
-      const orphaned = pane !== null && (pane === ORCHESTRATOR_MEMBER || !registered.has(pane));
-      // The refresh write + rename is atomic under the lock, so a visible
-      // `<x>.json.tmp.<pid>` file belongs to a process that died mid-write.
-      // The shape is anchored to the `.json.tmp.` infix so a legitimately
-      // named pane containing ".tmp." keeps its own record.
-      const staleTemp = entry.name.includes(".json.tmp.");
-      if (orphaned || (staleTemp && !registered.has(pane ?? ""))) rmSync(join(directory, entry.name), { force: true });
-    }
-  }
+  removeOrphanedPendingFiles(directory, registered);
   for (const member of Object.keys(state.memberTokens)) {
     if (member === ORCHESTRATOR_MEMBER) continue;
     // Per-pane best-effort: one unwritable record (collision, EACCES) must
     // not stop the sweep from converging the other panes.
     try { refreshPendingStatus(state, member); } catch { /* host sees the stale record until the operator clears it */ }
   }
+}
+
+function removeOrphanedPendingFiles(directory: string, registered: Set<string>): void {
+  if (existsSync(directory)) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      if (isOrphanedPendingFile(entry.name, registered)) rmSync(join(directory, entry.name), { force: true });
+    }
+  }
+}
+
+function isOrphanedPendingFile(name: string, registered: Set<string>): boolean {
+  const pane = name.endsWith(".json") ? name.slice(0, -".json".length) : null;
+  const orphaned = pane !== null && (pane === ORCHESTRATOR_MEMBER || !registered.has(pane));
+  // The refresh write + rename is atomic under the lock, so a visible
+  // `<x>.json.tmp.<pid>` file belongs to a process that died mid-write.
+  // The shape is anchored to the `.json.tmp.` infix so a legitimately
+  // named pane containing ".tmp." keeps its own record.
+  const staleTemp = name.includes(".json.tmp.");
+  return orphaned || (staleTemp && !registered.has(pane ?? ""));
 }

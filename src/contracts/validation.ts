@@ -30,10 +30,9 @@ export function interlockMetadata(metadata: Record<string, unknown>): InterlockM
   const value = metadataValue(metadata.interlock);
   if (!isRecord(value) || !hasOnlyKeys(value, ["contractId", "actor", "session", "paths", "leaseHealth"])
     || !nonEmpty(value.contractId) || !nonEmpty(value.actor)
-    || !isRecord(value.session) || !hasOnlyKeys(value.session, ["pid", "startedAt"]) || !positiveInteger(value.session.pid) || !nonEmpty(value.session.startedAt)
-    || !Array.isArray(value.paths) || value.paths.length === 0 || !value.paths.every((path) => typeof path === "string")
-    || !isRecord(value.leaseHealth) || !hasOnlyKeys(value.leaseHealth, ["status", "heartbeatAt"])
-    || value.leaseHealth.status !== "fresh" || !nonNegativeSafeInteger(value.leaseHealth.heartbeatAt)) {
+    || !validSession(value.session)
+    || !validPaths(value.paths)
+    || !validLeaseHealth(value.leaseHealth)) {
     return undefined;
   }
 
@@ -103,4 +102,14 @@ function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validSession(value: unknown): value is InterlockMetadata["session"] {
+  return isRecord(value) && hasOnlyKeys(value, ["pid", "startedAt"]) && positiveInteger(value.pid) && nonEmpty(value.startedAt);
+}
+function validPaths(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((path) => typeof path === "string");
+}
+function validLeaseHealth(value: unknown): value is InterlockMetadata["leaseHealth"] {
+  return isRecord(value) && hasOnlyKeys(value, ["status", "heartbeatAt"]) && value.status === "fresh" && nonNegativeSafeInteger(value.heartbeatAt);
 }

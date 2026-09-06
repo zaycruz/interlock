@@ -15,6 +15,7 @@ export interface ToolResult {
   [key: string]: unknown;
   content: { type: "text"; text: string }[];
   isError?: boolean;
+  structuredContent?: Record<string, unknown>;
 }
 export type ToolHandler = (args: Record<string, unknown>) => ToolResult;
 
@@ -46,11 +47,12 @@ function withPaneEnv<T>(config: McpConfig, run: () => T): T {
 // produces and assert none carries --token. Tests restore the real runner.
 export const engineRunner: { run: typeof runCoordinationCli } = { run: runCoordinationCli };
 
-function invoke(config: McpConfig, argv: string[]): ToolResult {
+export function invoke(config: McpConfig, argv: string[]): ToolResult {
   const result = withPaneEnv(config, () => engineRunner.run(argv));
   if (result === null) throw new Error("not a coordination command: " + argv.join(" "));
   if (result.exitCode !== 0) return { isError: true, content: [{ type: "text", text: result.stderr.trim() === "" ? "coordination CLI failed" : result.stderr.trim() }] };
-  return { content: [{ type: "text", text: result.stdout }] };
+  const structuredContent = z.record(z.string(), z.unknown()).parse(JSON.parse(result.stdout));
+  return { content: [{ type: "text", text: result.stdout }], structuredContent };
 }
 
 function textArg(args: Record<string, unknown>, name: string): string {
@@ -77,21 +79,23 @@ function optionalTextArg(args: Record<string, unknown>, name: string): string | 
 // deliveries plus any repaired redeliveries. The tool passes it through
 // unchanged so the MCP answer is the CLI answer (R8).
 function inboxListHandler(config: McpConfig): ToolHandler {
-  return () => invoke(config, ["inbox", "--pane", config.pane, "--json"]);
+  return (args) => {
+    const argv = ["inbox", "--pane", config.pane, "--json"];
+    const thread = numberArg(args, "thread");
+    const task = optionalTextArg(args, "task");
+    if (thread !== undefined) argv.push("--thread", String(thread));
+    if (task !== undefined) argv.push("--task", task);
+    return invoke(config, argv);
+  };
 }
 
-// The summary is pointer-shaped on purpose (R12): counts, digest ids, and
-// file paths — never message bodies — so the cheap "is there work?" question
-// never pulls the inbox into the agent's context window.
 function inboxSummaryHandler(config: McpConfig): ToolHandler {
   return () => {
-    const listed = invoke(config, ["inbox", "--pane", config.pane, "--json"]);
-    if (listed.isError) return listed;
-    const parsed = JSON.parse(listed.content[0]!.text) as { pane: string; messages: { state: string }[]; digests: { id: number; messageIds: number[]; reason: string; file: string }[] };
-    const pending = parsed.messages.filter((message) => message.state === "queued" || message.state === "claimed").length;
-    // messageCount, never the id set: the summary stays pointer-shaped (R12).
-    const digests = parsed.digests.map((digest) => ({ id: digest.id, messageCount: digest.messageIds.length, reason: digest.reason, file: digest.file }));
-    return { content: [{ type: "text", text: JSON.stringify({ ok: true, pane: parsed.pane, pending, digests }, null, 2) }] };
+    const result = invoke(config, ["inbox", "summary", "--pane", config.pane]);
+    if (result.isError) return result;
+    const parsed = z.object({ pending: z.object({ total: z.number() }) }).passthrough().parse(result.structuredContent);
+    const structuredContent = { ...parsed, pending: parsed.pending.total };
+    return { content: [{ type: "text", text: JSON.stringify(structuredContent) }], structuredContent };
   };
 }
 
@@ -114,6 +118,10 @@ function messageSendHandler(config: McpConfig): ToolHandler {
     if (replyTo !== undefined) argv.push("--reply", String(replyTo));
     const channel = numberArg(args, "channel");
     if (channel !== undefined) argv.push("--channel", String(channel));
+    const task = optionalTextArg(args, "task");
+    if (task !== undefined) argv.push("--task", task);
+    const requestId = optionalTextArg(args, "request_id");
+    if (requestId !== undefined) argv.push("--request-id", requestId);
     return invoke(config, argv);
   };
 }
@@ -122,6 +130,8 @@ export interface ToolSpec {
   name: string;
   description: string;
   schema: z.ZodRawShape;
+  outputSchema?: z.ZodRawShape;
+  readOnly?: boolean;
   handler: (config: McpConfig) => ToolHandler;
 }
 
@@ -133,25 +143,30 @@ export const TOOL_SPECS: ToolSpec[] = [
   {
     name: "inbox_list",
     description: "List this pane's pending coordination messages (queued and claimed) plus delivered digests. Pull-based: call it at natural seams, not on every step.",
-    schema: {},
+    schema: { thread: z.number().int().positive().optional(), task: z.string().min(1).optional() },
+    outputSchema: { ok: z.boolean(), pane: z.string(), messages: z.array(z.record(z.string(), z.unknown())), digests: z.array(z.record(z.string(), z.unknown())), redelivered: z.array(z.number()) },
     handler: inboxListHandler,
   },
   {
     name: "inbox_summary",
     description: "Cheap pending-work check for this pane: how many messages are pending and which digest files exist. Returns no message bodies. Read a digest file only when the summary says work is waiting.",
     schema: {},
+    outputSchema: { ok: z.boolean(), pane: z.string(), pending: z.number(), digests: z.array(z.record(z.string(), z.unknown())), digestTotal: z.number(), digestsTruncated: z.boolean() },
+    readOnly: true,
     handler: inboxSummaryHandler,
   },
   {
     name: "inbox_claim",
     description: "Claim a pending message by id before acting on it. Claimed still counts as pending: the sender expects a reply and a close.",
     schema: { message: z.number().int().positive().describe("message id from inbox_list") },
+    outputSchema: { ok: z.boolean(), message: z.record(z.string(), z.unknown()) },
     handler: (config) => inboxMutationHandler(config, "claim"),
   },
   {
     name: "inbox_close",
     description: "Mark a handled message closed after you have replied (message_send with reply_to). Close only when the thread is actually done.",
     schema: { message: z.number().int().positive().describe("message id to close") },
+    outputSchema: { ok: z.boolean(), message: z.record(z.string(), z.unknown()) },
     handler: (config) => inboxMutationHandler(config, "close"),
   },
   {
@@ -160,9 +175,12 @@ export const TOOL_SPECS: ToolSpec[] = [
     schema: {
       to: z.string().min(1).describe("recipient pane (omit when reply_to is set; the reply routes to the thread's sender)").optional(),
       text: z.string().min(1).describe("message body"),
+      task: z.string().min(1).describe("task ID for durable work context").optional(),
+      request_id: z.string().min(1).describe("Stable sender request ID. Reuse it only to retry the identical send.").optional(),
       reply_to: z.number().int().positive().describe("message id of the message being answered").optional(),
       channel: z.number().int().positive().describe("leader channel id, for channel sends only").optional(),
     },
+    outputSchema: { ok: z.boolean(), message: z.record(z.string(), z.unknown()), digests: z.array(z.record(z.string(), z.unknown())), deduplicated: z.boolean() },
     handler: messageSendHandler,
   },
 ];

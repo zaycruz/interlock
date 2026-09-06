@@ -1,280 +1,101 @@
 # Interlock
 
-Interlock is a local coordination product for agent sessions. It combines
-exact-path lease safety with agent-native task claims, pane messaging, durable
-inbox digests, and a read-only dashboard.
+Interlock coordinates local coding agents that work in Git worktrees. An agent can discover a task, claim exact paths, exchange task-linked messages, save a checkpoint, and submit a result for verification. Beads owns the issue. Interlock owns execution coordination and leases.
 
-See `GOAL.md` for the product completion contract.
+Interlock is for cooperating agents that run as the same operating-system user. It is not a hosted tracker, an agent scheduler, or a security boundary between agents.
 
-## Agent-native coordination
+## Install V1
 
-Tasks carry a business value so agents can see why work matters, not only what
-files it touches. Claims are exclusive and fail closed when another pane owns
-the task. Messages are correlated by thread and delivered to pane-scoped
-inboxes. Idle and done transitions, plus the watcher heartbeat, create durable
-digest artifacts under `$INTERLOCK_STATE_DIR/deliveries/<pane>/`.
-
-The coordination CLI is available through the `interlock` command:
-
-```text
-interlock session register --pane <pane> --token <pane-token>
-interlock task add --id <id> --title <title> --value <business-value> --pane <pane> --token <pane-token>
-interlock task claim <id> --pane <pane> --token <pane-token>
-interlock task reap <id> --pane <operator-pane> --token <operator-token> --dead-claimer <pane>  # claimer session must be done; staleness alone never allows reap
-interlock send --from-pane <pane> --to-pane <pane> --token <pane-token> --text <text>
-interlock inbox --pane <pane> --token <pane-token> --json
-interlock session set --pane <pane> --token <pane-token> --state <idle|busy|done>
-interlock watch --once
-interlock dashboard --once
-```
-
-`dashboard` only reads coordination state. It is the human awareness surface;
-task and message mutations remain agent/CLI operations.
-
-## Agent tools over MCP
-
-Run `interlock-mcp` when your agent host speaks MCP instead of a shell. The
-server exposes exactly five tools: `inbox_list`, `inbox_summary`,
-`inbox_claim`, `inbox_close`, and `message_send`. Each tool calls the same
-coordination engine as the CLI, so token authentication, routing boundaries,
-and the message state machine behave identically through either door.
-
-Follow the pull protocol. Call `inbox_summary` at natural seams; read a
-digest file or call `inbox_list` only when the summary says work is waiting.
-Claim a message before acting, reply with `message_send` and `reply_to`, then
-close it. Sends are quiet: Interlock never interrupts a running agent.
-
-The engine keeps a count-only status file per pane at
-`$INTERLOCK_STATE_DIR/pending/<pane>.json` (for example
-`{"version":1,"pane":"wT:p4","pending":2,"oldestPendingAt":"...","updatedAt":"..."}`).
-Your host can read that file for an "N pending" nudge. The file never
-contains message text, senders, or topics.
-
-### Wire the server to a host
-
-One server instance serves exactly one pane. Set these variables for the
-server process:
-
-|Variable|Meaning|
-|---|---|
-|`INTERLOCK_PANE`|The pane this server acts as. Required.|
-|`INTERLOCK_PANE_TOKEN`|The pane's bearer token. Same value the CLI passes with `--token`.|
-|`INTERLOCK_STATE_DIR`|The shared state directory. Defaults to the engine default when unset.|
-
-**Warning:** the token is a bearer secret. Pass it only through the host's
-server-environment mechanism. Never put it in a message, a task value, or a
-tracked file.
-
-For Codex, add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.interlock]
-command = "node"
-args = ["/absolute/path/to/interlock/dist/src/mcp/main.js"]
-
-[mcp_servers.interlock.env]
-INTERLOCK_PANE = "wT:p4"
-INTERLOCK_PANE_TOKEN = "<pane-token>"
-INTERLOCK_STATE_DIR = "/path/to/interlock-state"
-```
-
-Codex supports per-tool `approval_mode`. Gate the write tools
-(`message_send`, `inbox_claim`, `inbox_close`) if you want a human to
-approve every send or close the agent attempts.
-
-For Claude Code, add to the project's `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "interlock": {
-      "command": "node",
-      "args": ["/absolute/path/to/interlock/dist/src/mcp/main.js"],
-      "env": {
-        "INTERLOCK_PANE": "wT:p4",
-        "INTERLOCK_PANE_TOKEN": "<pane-token>",
-        "INTERLOCK_STATE_DIR": "/path/to/interlock-state"
-      }
-    }
-  }
-}
-```
-
-For OMP or any other stdio MCP host, use the same command and environment
-triple. The server starts even when the variables are missing; each tool call
-then fails with the missing variable named.
-
-To surface a nudge, read `pending/<pane>.json` and display `pending` with the
-age derived from `oldestPendingAt`. Treat a missing file as zero pending —
-absence means the pane was never swept, not that work is waiting.
-
-The MCP surface adds no new authority. A server can only act as its own pane,
-with its own token, under the same rules the CLI enforces.
-
-## Interlock in Herdr
-
-Use the Herdr adapter when you run Interlock from Herdr panes.
-
-### Install the engine and adapter
-
-Install the Interlock engine from npm.
+Install the verified GitHub release archive:
 
 ```sh
-npm install -g @raava-solutions/interlock
+npm install --global https://github.com/zaycruz/interlock/releases/download/v1.0.0/raava-solutions-interlock-1.0.0.tgz
+interlock --help
 ```
 
-Run setup from a terminal that can use Herdr.
+Use this archive for version 1.0.0. The npm registry release is separate. Install Node.js 22 or later and the Beads CLI before you create linked coding tasks.
+
+## Start from source
+
+Use Node.js 22.13 or later to develop from source on macOS or Linux. The published runtime supports Node.js 22 or later. Install the Beads CLI before you use linked coding tasks. Initialize Beads in the target Git repository.
 
 ```sh
-interlock setup
+npm ci
+npm run build
+node dist/src/cli/main.js --help
 ```
 
-Read the setup plan before you answer the prompt.
+The package provides `interlock` and `interlock-mcp` executables. Run `npm pack` to create a local release archive. Install that archive in your chosen tool environment. Package creation does not establish publication or release acceptance.
 
-Type `yes` to install the `@raava-solutions/interlock-plugin-herdr` adapter.
+Set `INTERLOCK_STATE_DIR` to one shared local directory for the participating agents. Inject `INTERLOCK_PANE_TOKEN` from 1Password into each agent process. Do not put tokens in tracked configuration, command arguments, task text, or messages.
 
-Setup echoes each host command before it runs the command.
-
-Setup installs the adapter package when the expected version is not resolvable.
-
-Setup activates the adapter only through `herdr plugin link <path>`.
-
-Setup does not write Herdr configuration files directly.
-
-Run the scriptable form only when your automation provides explicit consent.
+Register a standalone pane with the token already in its environment:
 
 ```sh
-interlock setup --yes
+interlock session register --pane worker-a
 ```
 
-Run `interlock setup --remove` to unlink the adapter.
+For managed pods, the operator provisions membership with `interlock orchestrator init` and `interlock pod create`. Pod creation returns member tokens once. Give each token only to its matching pane. Standalone registration does not provision pod membership.
 
-The remove command keeps the npm package installed.
+## Complete a coding task
 
-### Check the integration
+A linked task identifies one Beads issue by its Git common directory and issue ID. Its selected worktree is separate from that identity. Different task IDs cannot link to the same canonical issue.
 
-Run this command after setup and before you diagnose a Herdr problem.
+Create a Beads issue with `Value:`, `Work:`, and acceptance criteria. Supply one verification command for each nonempty acceptance line. A check's `criterion` must match that line without its bullet marker.
+
+This example assumes the issue's acceptance criterion is `Unit tests pass`:
 
 ```sh
-interlock doctor
+interlock task add --id fix-parser --pane worker-a \
+  --workspace /absolute/path/to/worktree \
+  --contract '{"beadId":"project-123","paths":["src/parser.ts"],"checks":[{"criterion":"Unit tests pass","command":["npm","test"]}]}'
+interlock task inspect fix-parser --pane worker-a
+interlock task claim fix-parser --pane worker-a --session-pid $$
+interlock task checkpoint fix-parser --pane worker-a --text 'Parser changed. Run the acceptance check next.'
+interlock task complete fix-parser --pane worker-a \
+  --result '{"summary":"Corrected parser behavior","artifacts":["src/parser.ts"]}'
 ```
 
-Doctor does not change Herdr or Interlock state.
+The shell example binds ownership to that shell's lifetime. Host adapters bind ownership to their own process. A claim requires all exact-path leases before Beads ownership changes. Use `task heartbeat` at work seams during a long task.
 
-Doctor checks the engine version, the Interlock state directory, the consent
-record, Herdr availability, the plugin link, and engine-plugin version drift.
+Completion runs the checks captured at claim in the claimed worktree. Failed checks, changed acceptance, contract drift, or staged paths outside the lease block completion. The result summary and artifact references remain `agent-declared`. Recorded check outcomes are `interlock-executed`. A successful check proves only the behavior that its command tests.
 
-Doctor reports an unusable Herdr binary with the exact reason.
+A task created with `--title` and `--value` but no `--contract` is coordination-only work. It does not grant file ownership. Its `done` state does not represent executed acceptance checks.
 
-Run `interlock setup --yes` to repair a missing link or an older adapter.
+## Coordinate without interruptions
 
-Upgrade the engine when doctor reports that the adapter is newer than the
-engine.
+```sh
+interlock send --from-pane worker-a --to-pane worker-b \
+  --task fix-parser --request-id parser-question-1 --text 'Which input caused the failure?'
+interlock inbox summary --pane worker-b
+interlock inbox --pane worker-b --task fix-parser --json
+interlock task resume fix-parser --pane worker-a
+```
 
-### Provision pane tokens
+Claim a message before you act on it. Reply with `--reply <message-id>`. Close the handled message with `interlock inbox close --message <message-id> --pane <pane>`.
 
-**Warning:** Treat each pane token as a bearer secret.
+Reuse a sender's request ID only for an identical retry. A changed payload with the same key fails. Task and request threads survive compaction. Task resume returns only messages sent or received by the requesting pane. Sharing a task does not expose other panes' private messages.
 
-Do not put a token in a message, a task value, or a tracked file.
+Sends are quiet. Agents pull their inbox at natural seams. `interlock dashboard --once` provides a read-only local view. Inbox summaries contain counts and a bounded digest listing. The engine still loads local coordination state.
 
-Store each pane token in the 1Password team vault.
+## Connect an agent host
 
-Name each item `interlock member token <pane>`.
+Start `interlock-mcp` as a stdio server. Set `INTERLOCK_PANE`, `INTERLOCK_PANE_TOKEN`, and `INTERLOCK_STATE_DIR` in the server environment. Run one server per pane. Supply secrets through the host's environment injection mechanism.
 
-Give the token only to the matching Herdr pane session.
+MCP exposes task discovery, execution, recovery, messaging, and pod/channel discovery. Tools return structured results. The server supplies its own pane and process identity. Pod provisioning and host installation remain operator operations. See the [capability map](docs/capabilities.md).
 
-The orchestrator mints one token for each pod member with `interlock pod create`. Store each token in the 1Password team vault as `interlock member token <pane>`. `interlock session register` is for standalone members only.
+The Pi extension is exported as `@raava-solutions/interlock/pi`. For a source build, load its entry point explicitly:
 
-Interlock stores only the token hash in its state directory.
+```sh
+pi -e /absolute/path/to/interlock/dist/src/pi/index.js
+```
 
-### Send messages from panes
+Inject `INTERLOCK_PANE_TOKEN` before Pi starts. Set `INTERLOCK_PANE` for a provisioned pane. If it is absent, the extension registers `pi:<session-id>` as a standalone pane. Use `/interlock-resume`, `/interlock-inspect`, `/interlock-claim`, `/interlock-heartbeat`, `/interlock-release`, and `/interlock-complete <task-id> <JSON result>`.
 
-The Herdr adapter maps each pane to one Interlock member.
+The extension refreshes owned active leases and preserves ownership during reload. Session departure releases its exact active linked contracts. Idle does not complete work. A killed host requires verified-death recovery.
 
-The adapter registers the pane session with its pane token.
+The existing Herdr adapter uses the same coordination store. `interlock setup` shows its install plan and requests consent. `interlock setup --yes` provides scriptable consent. `interlock doctor` checks the integration without changing state. `interlock setup --remove` unlinks the adapter and retains its installed package. These commands are Herdr-specific.
 
-The adapter sends pane messages through Interlock channels.
+## Recover and operate
 
-Members can message members in the same pod.
-
-Only pod leaders can use a channel to message a leader in another pod.
-
-The adapter updates session state when a pane becomes idle, busy, or done.
-
-Interlock writes durable digests for idle panes and done panes.
-
-The adapter reads the shared `$INTERLOCK_STATE_DIR` state directory.
-
-The adapter does not keep a second message or digest store.
-
-The orchestrator mints one token per pane with `interlock pod create`; the coordination
-state stores only token hashes. Mutating commands and pane-scoped inbox reads
-must present the matching token. Pane and task identifiers accept only
-`^[A-Za-z0-9:._-]+$` without `..`.
-
-The Herdr `space.js` and Pi extension integration uses the exported
-`createSpaceAdapter()` boundary. `space.js` resolves its existing routing to a
-pane, then delegates `send`, `inbox`, `session`, and one-shot `watch` calls to
-Interlock with the pane token. The adapter shares `$INTERLOCK_STATE_DIR`; it
-does not maintain a second message or digest ledger.
-
-## Lease safety
-
-Interlock conflicts only on exact declared repository-relative Git paths after
-portable separator normalization, NFC Unicode normalization, and deterministic
-case folding. This conservative rule applies on every filesystem so clients in
-worktrees on different filesystems cannot miss a shared lease collision.
-
-Interlock does not treat symlink or hard-link physical-file aliases as lock
-aliases. Agents must declare the same repository-relative Git path when they
-need a conflict.
-
-## Security and threat model
-
-Read this section before you deploy Interlock. Interlock is a **local,
-same-user** coordination tool. It assumes every process that can reach its
-state directory already runs as you, on your machine. It does not provide
-security boundaries between OS users, machines, or networks, and it does not
-defend against an attacker who can read or write your state directory
-directly — that attacker already owns everything Interlock protects.
-
-Within that model, Interlock authenticates every mutating CLI command with
-per-pane tokens (only SHA-256 hashes are stored, compared timing-safe) and
-validates all identifiers against a strict character set. What it protects
-against is confused or misbehaving *agents* acting through the CLI, not
-adversaries with filesystem access.
-
-Known limitations, disclosed plainly:
-
-- **Plaintext state at rest.** Messages, task values, and coordination state
-  are stored unencrypted in `$INTERLOCK_STATE_DIR` (including
-  `state.json` and digest delivery files). Never paste secrets, credentials,
-  or sensitive personal data into Interlock messages or task values.
-- **First-registration identity trust.** A pane identity is bound to
-  whichever local process registers that pane name first. A local process can
-  squat an unclaimed pane name. Provision pane names you care about early,
-  and treat unexpected registration conflicts as a signal to investigate.
-- **`--session-pid` is caller-scoped.** The lease lifecycle accepts only the
-  calling process or one of its ancestors as a session identity; foreign
-  process IDs (including PID 1) are rejected. Within the same-user model this
-  is a courtesy check, not a security boundary — a caller can still bind
-  leases to a long-lived ancestor (for example its shell) and delay
-  stale-session reclamation. Do not rely on PID binding as proof of
-  identity.
-- **MCP host configs hold the pane token in plaintext.** Wiring
-  `interlock-mcp` puts `INTERLOCK_PANE_TOKEN` in your host's config file
-  (`~/.codex/config.toml`, `.mcp.json`, or equivalent). Anyone who can read
-  that file can act as that pane. Keep those files out of tracked
-  directories, or point the env value at your secret manager's injection
-  mechanism instead of a literal.
-- **Beads metadata is visible to repo collaborators.** Interlock records
-  actor, PID, process start time, and leased repository-relative paths in
-  Beads issue metadata. Keep secrets out of paths and identifiers.
-- **Tokens are bearer secrets in your environment.** Pane tokens are
-  delivered through your local provisioning channel (for example, your
-  terminal or agent configuration). Anyone who reads a token can act as that
-  pane through the CLI. Store tokens in a secret manager, never in files or
-  messages.
-
-If you need multi-user, multi-machine, or networked coordination with real
-adversaries, Interlock's current threat model does not cover your use case.
+Read [V1 operation and limits](docs/gtm-v1.md) for recovery, upgrades, and release criteria. Read [GOAL.md](GOAL.md) for the completion contract. Run `npm run typecheck`, `npm test`, and `npm run test:adapter` for repository checks. The engineering gate and release dogfood require separate recorded evidence.

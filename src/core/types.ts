@@ -101,6 +101,7 @@ export interface LeaseStoreOptions {
 export interface LeaseReader {
   readonly databasePath: string;
   listWorkContracts(): LeaseState[];
+  pendingLifecycleForBead?(beadId: string): Array<{ kind: "completion" | "recovery"; contractId: string }>;
   getWorkContractByBeadId(beadId: string): LeaseState | undefined;
   close(): void;
 }

@@ -50,29 +50,14 @@ export interface AppointedPod {
 // bounded so the awareness feed stays a scannable index.
 export const CHANNEL_TOPIC_MAX_LENGTH = 140;
 
-// ADR 0003 OQ2: the awareness feed is append-only, so writes cap it at the
-// most recent AWARENESS_FEED_MAX_EVENTS events. The id counter is never
-// lowered: a dropped event's id is never reused, and the retained suffix is
-// always a contiguous run of the highest ids, so reconstruction from the feed
-// remains well-defined for every event still present.
+// Retain the latest events without reusing an event ID.
 export const AWARENESS_FEED_MAX_EVENTS = 1000;
 
-// ADR 0003 OQ3: scale limits. A deployment is one orchestrator and its pods
-// in one state file; these named bounds keep that file, the awareness feed,
-// and the routing tables small enough for the file-backed store. Refusals
-// name the limit so an operator hitting one can see the ceiling, not a
-// mystery failure.
+// Bound deployment state while preserving closed-pod history.
 export const MAX_PODS_PER_DEPLOYMENT = 64;
 export const MAX_ROSTER_SIZE = 16;
 
-// il-2t8: stage transitions are a matrix, not a free-for-all. Tasks move
-// forward through the work lifecycle and may recycle forward stages (a fresh
-// look at in-progress work), but a task never reopens from done/closed and
-// never manufactures a claim out of in-progress/blocked. Messages follow the
-// same shape, with one extra rule: queued messages are still awaiting digest
-// delivery, and closing is digest-invisible, so a queued message must be
-// claimed (or answered, which marks it handled) before it can be closed —
-// otherwise mail could vanish without ever surfacing in a digest.
+// Terminal tasks cannot reopen. Queued messages must surface before closure.
 const TASK_STAGE_TRANSITIONS: Record<TaskStage, ReadonlySet<TaskStage>> = {
   // open -> closed is deliberately absent: task mutation is owner-only, and
   // an open task has no owner, so the edge would be unreachable. Withdrawing
@@ -124,12 +109,7 @@ export function validateChannelTopic(value: string): string {
 
 export function parsePodTemplate(value: unknown): PodTemplate {
   if (!isRecord(value)) throw new Error("pod template must be a JSON object with members, leader, and succession");
-  const members = nameList(value.members, "roster");
-  if (members.length === 0) throw new Error("pod template roster must be a non-empty array of member names");
-  if (new Set(members).size !== members.length) throw new Error("pod template roster contains a duplicate member name");
-  for (const member of members) {
-    if (member === ORCHESTRATOR_MEMBER) throw new Error("member name orchestrator is reserved and cannot join a pod roster");
-  }
+  const members = parsePodRoster(value.members);
   if (typeof value.leader !== "string" || value.leader.trim() === "") throw new Error("pod template requires a leader member name");
   const leader = value.leader;
   if (!members.includes(leader)) throw new Error("pod template leader " + leader + " is not in the roster");
@@ -139,6 +119,16 @@ export function parsePodTemplate(value: unknown): PodTemplate {
     if (!members.includes(member)) throw new Error("pod template succession member " + member + " is not in the roster");
   }
   return { members, leader, succession };
+}
+
+function parsePodRoster(value: unknown): string[] {
+  const members = nameList(value, "roster");
+  if (members.length === 0) throw new Error("pod template roster must be a non-empty array of member names");
+  if (new Set(members).size !== members.length) throw new Error("pod template roster contains a duplicate member name");
+  for (const member of members) {
+    if (member === ORCHESTRATOR_MEMBER) throw new Error("member name orchestrator is reserved and cannot join a pod roster");
+  }
+  return members;
 }
 
 function nameList(value: unknown, label: string): string[] {
@@ -212,6 +202,10 @@ export function appointPod(state: CoordinationState, name: string, appointment: 
     return { pod, member: appointee, tokens: {} };
   }
 
+  return appointNewMember(state, pod, appointment);
+}
+
+function appointNewMember(state: CoordinationState, pod: Pod, appointment: Extract<PodAppointment, { member: string }>): AppointedPod {
   const memberName = validateMemberName(appointment.member, "appointee member");
   if (memberName === ORCHESTRATOR_MEMBER) throw new Error("member name orchestrator is reserved and cannot join a pod roster");
   const existingMember = state.podMembers.find((candidate) => candidate.member === memberName);
@@ -309,6 +303,10 @@ export function evaluateSuccession(state: CoordinationState, member: string): vo
   leader.diedAt = new Date().toISOString();
   appendAwarenessEvent(state, "leader-death-verified", { pod: pod.name, member: leader.member });
 
+  promoteSuccessor(state, pod, leader);
+}
+
+function promoteSuccessor(state: CoordinationState, pod: Pod, leader: PodMember): void {
   for (const candidate of pod.succession) {
     if (candidate === leader.member) continue;
     const successor = state.podMembers.find((entry) => entry.member === candidate && entry.pod === pod.name);
@@ -394,23 +392,8 @@ export function assertNotDoneLeader(state: CoordinationState, member: string, ac
 // ADR 0003 D4: the routing boundary, decided by one pure function over state.
 // Rules evaluate in order; anything not explicitly allowed is rejected.
 export function assertSendAllowed(state: CoordinationState, fromMember: string, toMember: string, channelId?: number): void {
-  // The orchestrator is never a channel endpoint (D5): leaders file non-channel
-  // reports to it, and it messages pod leaders only. Never workers.
   if (fromMember === ORCHESTRATOR_MEMBER || toMember === ORCHESTRATOR_MEMBER) {
-    if (channelId !== undefined) throw new Error("send rejected: the orchestrator is not a leader-channel endpoint; reports to the orchestrator do not ride channels");
-    const leader = fromMember === ORCHESTRATOR_MEMBER ? toMember : fromMember;
-    const entry = membershipOf(state, leader);
-    // ADR 0003 D6 (MF-C): a leader that reported done sheds external reach,
-    // including reports to the orchestrator, while it waits for appointment.
-    if (entry !== undefined && entry.member.doneAt !== null && entry.member.role === "leader") {
-      throw new Error("send rejected: leader " + entry.member.member + " has reported done and no longer has external reach");
-    }
-    if (fromMember === ORCHESTRATOR_MEMBER && (entry === undefined || entry.pod.status !== "open" || entry.member.role !== "leader")) {
-      throw new Error("send rejected: the orchestrator can only message pod leaders, never workers");
-    }
-    if (toMember === ORCHESTRATOR_MEMBER && (entry === undefined || entry.pod.status !== "open" || entry.member.role !== "leader")) {
-      throw new Error("send rejected: only a pod leader can report to the orchestrator");
-    }
+    assertOrchestratorSendAllowed(state, fromMember, toMember, channelId);
     return;
   }
   const from = membershipOf(state, fromMember);
@@ -419,30 +402,46 @@ export function assertSendAllowed(state: CoordinationState, fromMember: string, 
   if (to === undefined) throw new Error("send rejected: member " + toMember + " is not in a pod");
   if (from.pod.status === "closed") throw new Error("send rejected: pod " + from.pod.name + " is closed");
   if (to.pod.status === "closed") throw new Error("send rejected: pod " + to.pod.name + " is closed");
-  // ADR 0003 D6 (MF-C): a leader that reported done sheds external reach. A
-  // done leader cannot send outside its pod — not to another pod, not to the
-  // orchestrator — while it waits for the orchestrator to appoint or close.
-  if (from.member.doneAt !== null && from.member.role === "leader" && from.pod.name !== to.pod.name) {
-    throw new Error("send rejected: leader " + fromMember + " has reported done and no longer has external reach");
-  }
-  // Rule 1: same pod, any member to any member including the leader.
   if (from.pod.name === to.pod.name) {
     if (channelId !== undefined) throw new Error("send rejected: leader channels carry cross-pod sends only, not intra-pod mail");
     return;
   }
-  // Rule 2: leader to leader of another pod, only over an open channel whose
-  // endpoints are exactly the two pods.
-  if (from.member.role !== "leader") throw new Error("send rejected: worker " + fromMember + " cannot send outside pod " + from.pod.name);
-  if (to.member.role !== "leader") throw new Error("send rejected: external mail to pod " + to.pod.name + " is addressed to its leader, never to worker " + toMember);
-  if (channelId === undefined) throw new Error("send rejected: pods " + from.pod.name + " and " + to.pod.name + " have no open leader channel; name one with --channel");
+  assertCrossPodSendAllowed(state, from, to, channelId);
+}
+
+type Membership = { pod: Pod; member: PodMember };
+
+function assertOrchestratorSendAllowed(state: CoordinationState, from: string, to: string, channelId?: number): void {
+  if (channelId !== undefined) throw new Error("send rejected: the orchestrator is not a leader-channel endpoint; reports to the orchestrator do not ride channels");
+  const leader = from === ORCHESTRATOR_MEMBER ? to : from;
+  const entry = membershipOf(state, leader);
+  if (entry !== undefined && entry.member.doneAt !== null && entry.member.role === "leader") {
+    throw new Error("send rejected: leader " + entry.member.member + " has reported done and no longer has external reach");
+  }
+  if (entry !== undefined && entry.pod.status === "open" && entry.member.role === "leader") return;
+  if (from === ORCHESTRATOR_MEMBER) throw new Error("send rejected: the orchestrator can only message pod leaders, never workers");
+  throw new Error("send rejected: only a pod leader can report to the orchestrator");
+}
+
+function assertCrossPodSendAllowed(state: CoordinationState, from: Membership, to: Membership, channelId?: number): void {
+  if (from.member.doneAt !== null && from.member.role === "leader") {
+    throw new Error("send rejected: leader " + from.member.member + " has reported done and no longer has external reach");
+  }
+  if (from.member.role !== "leader") throw new Error("send rejected: worker " + from.member.member + " cannot send outside pod " + from.pod.name);
+  if (to.member.role !== "leader") throw new Error("send rejected: external mail to pod " + to.pod.name + " is addressed to its leader, never to worker " + to.member.member);
+  assertSendChannel(state, from.pod.name, to.pod.name, channelId);
+}
+
+function assertSendChannel(state: CoordinationState, fromPod: string, toPod: string, channelId?: number): void {
+  if (channelId === undefined) throw new Error("send rejected: pods " + fromPod + " and " + toPod + " have no open leader channel; name one with --channel");
   const channel = state.leaderChannels.find((candidate) => candidate.id === channelId);
   if (channel === undefined) throw new Error("send rejected: unknown leader channel " + channelId);
-  const endpoints = (channel.fromPod === from.pod.name && channel.toPod === to.pod.name) || (channel.fromPod === to.pod.name && channel.toPod === from.pod.name);
-  if (!endpoints) throw new Error("send rejected: leader channel " + channelId + " does not connect pods " + from.pod.name + " and " + to.pod.name);
+  const endpoints = (channel.fromPod === fromPod && channel.toPod === toPod) || (channel.fromPod === toPod && channel.toPod === fromPod);
+  if (!endpoints) throw new Error("send rejected: leader channel " + channelId + " does not connect pods " + fromPod + " and " + toPod);
   if (channel.closedAt !== null) throw new Error("send rejected: leader channel " + channelId + " is closed");
 }
 
-function membershipOf(state: CoordinationState, member: string): { pod: Pod; member: PodMember } | undefined {
+function membershipOf(state: CoordinationState, member: string): Membership | undefined {
   const entry = state.podMembers.find((candidate) => candidate.member === member);
   if (entry === undefined) return undefined;
   const pod = state.pods.find((candidate) => candidate.name === entry.pod);

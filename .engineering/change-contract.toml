@@ -1,0 +1,128 @@
+[[justifications]]
+trigger = "scope_limit"
+reason = "The approved V1 plan joins existing lease and task lifecycles and requires parity, crash recovery, and real acceptance evidence. Cohesive extractions reduce oversized modules before the behavior changes."
+
+[[justifications]]
+trigger = "new_module"
+reason = "Extract existing lifecycle and scope analysis along the application and governance boundaries. Add only the verification logic required to execute captured acceptance checks."
+
+[[justifications]]
+trigger = "new_test_file"
+reason = "New tests prove missing V1 lifecycle behavior and prevent governance extraction from removing blocking checks."
+
+[[justifications]]
+trigger = "new_dependency"
+reason = "The user explicitly authorized ESLint and the TypeScript parser on 2026-09-06. These development-only dependencies enforce native complexity and correctness lint. Existing runtime dependencies remain unchanged."
+
+[[justifications]]
+trigger = "public_api_change"
+reason = "CLI and MCP must expose the same supported worker lifecycle through a shared application boundary. Existing interfaces remain available."
+
+[[justifications]]
+trigger = "configuration_change"
+reason = "Both supported CI platforms must run the root and adapter suites through one deterministic quality gate with real Beads installed."
+
+[[reuse_checks]]
+new_symbol = ".engineering/scope.py"
+search = "Read the shared engineering.py runner and locate scope_results, file_size_results, and contract_results."
+reason = "Move those existing functions without changing their enforcement semantics. Keep command dispatch in engineering.py."
+
+[[reuse_checks]]
+new_symbol = "src/contracts/verification.ts"
+search = "Inspect existing contract rendering and CLI completion checks."
+reason = "Existing completion checks validate path ownership but do not execute acceptance criteria. Use Node child_process with a bounded timeout."
+
+[[test_cases]]
+test_file = ".engineering/test_scope.py"
+use_case = "The governance runner must retain enforcement after extraction and must isolate disposable Git repositories when invoked from a commit hook."
+behavior = "New oversized code and missing contract reasons fail. Reuse justifications remain required. Hook checks cannot change the invoking repository through inherited Git variables. Scope and format retain the intended staged index."
+
+[[test_cases]]
+test_file = "test/contracts/verification.test.ts"
+use_case = "An agent submits declared evidence without executing the acceptance checks."
+behavior = "Completion executes captured criterion commands in the claimed worktree, records real failure or timeout, and rejects invalid specifications. Declared strings cannot count as observed verification."
+
+[[reuse_checks]]
+new_symbol = "src/application/lease-commands.ts, src/application/status.ts, src/application/snapshot.ts, src/application/staged-paths.ts"
+search = "Inspect src/cli/run.ts, snapshot.ts, staged-paths.ts and existing CLI tests."
+reason = "Extract existing lease behavior into the application layer so CLI and MCP share its contract."
+
+[[reuse_checks]]
+new_symbol = "src/application/linked-types.ts, src/application/linked-contract.ts, src/application/linked-create.ts, src/application/linked-policy.ts, src/application/linked-tasks.ts, src/application/contract-validation.ts"
+search = "Inspect core lease-reader, completion/recovery operations and coordination task commands."
+reason = "Reuse SQLite lease ownership and Beads identity. Add explicit linked execution intents and enforce exact ownership across task and legacy entry points."
+
+[[reuse_checks]]
+new_symbol = "src/contracts/verification-process.ts"
+search = "Inspect the captured verification runner in src/contracts/verification.ts and child-process timeout behavior."
+reason = "Keep bounded process execution and output collection cohesive with its process lifecycle; do not add a generic job framework."
+
+[[reuse_checks]]
+new_symbol = "src/coordination/args.ts, src/coordination/digest.ts, src/coordination/state-pods.ts, src/coordination/task-commands.ts, src/coordination/task-schema.ts, src/coordination/task-edit.ts"
+search = "Inspect existing coordination commands.ts, state.ts, task types and transition tests."
+reason = "Extract parser, state validation, digest, and task mutation responsibilities. Reuse existing authentication and transition checks."
+
+[[reuse_checks]]
+new_symbol = "src/coordination/message-send.ts, src/coordination/inbox-summary.ts"
+search = "Inspect existing send and inbox command paths and persisted message schema."
+reason = "Preserve existing delivery effects while adding durable retry identity and bounded read-only inbox summaries."
+
+[[reuse_checks]]
+new_symbol = "src/mcp/coordination-tools.ts, src/mcp/task-tools.ts"
+search = "Inspect src/mcp/tools.ts, the MCP server registration, and CLI application operations."
+reason = "Expose the same worker operations through structured MCP results. Do not duplicate task or lease ownership logic."
+
+[[reuse_checks]]
+new_symbol = "src/pi/index.ts"
+search = "Inspect the Pi lifecycle requirement in GOAL.md and existing public CLI lifecycle operations."
+reason = "Bind host identity and lifecycle seams to public Interlock commands without adding a runtime dependency."
+
+[[reuse_checks]]
+new_symbol = "scripts/check-adapter.mjs"
+search = "Inspect the existing Herdr adapter package scripts and its public-interface tests."
+reason = "Run the existing compiler and tests against the current root package in temporary state. No second dependency installation is needed."
+
+[[test_cases]]
+test_file = "test/coordination/message-retries.test.ts"
+use_case = "A lost response can cause the sender to retry after compaction."
+behavior = "Retry creates one message, channel effect, and reply effect. Conflicting keys and unauthorized task/private history fail. Inbox summary does not mutate or repair state."
+
+[[test_cases]]
+test_file = "test/coordination/linked-lifecycle.test.ts"
+use_case = "Linked ownership must survive failures between the coordination index, Beads, and SQLite."
+behavior = "Exact reservations and intents recover without guessing identity. Acceptance changes and invalid paths block completion. Legacy attachment and cross-owner resolution preserve authority. Upgrade and terminal history remain intact."
+
+[[test_cases]]
+test_file = "test/mcp/tasks.test.ts"
+use_case = "MCP-only agents need the full task workflow without shell fallback or identity spoofing."
+behavior = "Independent MCP clients claim, coordinate, and complete linked work with observed evidence. Edits require the current revision and creator authority."
+
+[[test_cases]]
+test_file = "test/pi/lifecycle.test.ts"
+use_case = "Host reload, shutdown, and heartbeat failure can otherwise release or complete the wrong task."
+behavior = "Reload preserves claims. Shutdown releases only exact pane and process ownership and preserves pending completion. Failed release reports diagnostics and stops the timer. Claim binds PID and completion preserves the JSON payload."
+
+[[test_cases]]
+test_file = "test/pi/host-smoke.mjs"
+use_case = "A unit-tested host callback alone does not prove the extension loads in the supported host."
+behavior = "The installed Pi host loads the extension and exercises lifecycle context through the public boundary."
+
+[[reuse_checks]]
+new_symbol = "src/mcp/config.ts, src/mcp/main.ts, src/mcp/server.ts, src/mcp/tools.ts, src/coordination/pending-status.ts"
+search = "Compare origin/main with the prior local MCP integration and inspect existing coordination authentication and pending-message tests."
+reason = "The release includes the previously local MCP front door. Reuse the public coordination engine and exact pane identity rather than duplicating authorization."
+
+[[test_cases]]
+test_file = "test/mcp/server.test.ts"
+use_case = "An MCP agent needs authorized communication without credentials in tool arguments."
+behavior = "Actual MCP transports discover tools, preserve structured results, enforce pane and channel authority, and keep tokens out of argv."
+
+[[test_cases]]
+test_file = "test/mcp/packaging.test.ts"
+use_case = "A compiled server can be omitted from the shipped package."
+behavior = "The package manifest includes the compiled MCP executable and its Node entry point."
+
+[[test_cases]]
+test_file = "test/coordination/pending-status.test.ts"
+use_case = "Agent hosts need a pending-work indicator that follows durable inbox state."
+behavior = "Pending status follows addressed message transitions and safely removes stale status files."

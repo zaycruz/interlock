@@ -38,6 +38,10 @@ function normalizeLeasePath(value: string): string {
     throw new LeasePathError(`Path must not end with a directory separator: ${value}`);
   }
 
+  return canonicalLeasePath(value);
+}
+
+function canonicalLeasePath(value: string): string {
   const portablePath = value.replaceAll("\\", "/");
   if (portablePath.split("/").includes("..")) {
     throw new LeasePathError(`Path must not contain traversal: ${value}`);

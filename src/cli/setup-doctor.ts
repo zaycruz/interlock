@@ -41,59 +41,33 @@ function doctor(deps: Required<SetupDoctorDependencies>): CommandResult {
   const herdr = detectHerdr(deps);
   const plugin = deps.plugin();
   const consent = deps.readConsent();
-  const active = herdr === undefined || herdr === null ? false : pluginActive(deps, herdr, plugin);
-  const lines = [
-    `engine: ${deps.engineVersion}`,
-    `state directory: ${deps.stateDirectory()} (${deps.inspectStateDirectory()})`,
-    herdr === undefined || herdr === null ? "herdr: not detected" : `herdr: ${herdr.path} (${herdr.version}; floor ${deps.minimumHerdrVersion})`,
-    `consent record: ${consent === undefined ? "absent" : `${consent.timestamp} (${consent.pluginVersion})`}`,
-    `plugin link: ${active ? "active" : "not active"}`,
-  ];
+  const active = !isUsableHerdr(herdr) ? false : pluginActive(deps, herdr, plugin);
+  const drift = versionDrift(deps, herdr, plugin);
+  const lines = doctorLines(deps, herdr, consent, active);
   if (herdr === null) lines[2] = `herdr not usable: ${herdrReason(deps)}`;
-  if (herdr !== undefined && herdr !== null && plugin !== undefined && plugin.version !== deps.engineVersion) lines.push(`version drift: engine ${deps.engineVersion}, plugin ${plugin.version}`);
+  if (drift) lines.push(`version drift: engine ${deps.engineVersion}, plugin ${plugin!.version}`);
   const divergent = active !== (consent !== undefined);
   if (divergent) lines.push(`divergence: ${consent === undefined ? "plugin active without consent record" : "consent record exists but plugin is not active"}; repair: interlock setup --yes`);
-  const failed = herdr === null || deps.inspectStateDirectory() !== "healthy" || (herdr !== undefined && herdr !== null && plugin !== undefined && plugin.version !== deps.engineVersion) || divergent;
+  const failed = herdr === null || deps.inspectStateDirectory() !== "healthy" || (drift) || divergent;
   return { exitCode: failed ? 1 : 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
 }
 
 function setup(flags: string[], deps: Required<SetupDoctorDependencies>): CommandResult {
   const remove = flags.includes("--remove");
   const herdr = detectHerdr(deps);
-  if (herdr === undefined || herdr === null) {
-    if (!remove) return success("herdr is not usable; Interlock works standalone. Nothing was changed.");
-    deps.removeConsent();
-    return success(`herdr ${herdr === null ? `not usable: ${herdrReason(deps)}` : "not detected"}; skipped plugin unlink.\nRemoved Interlock's consent record.`);
-  }
+  if (!isUsableHerdr(herdr)) return standaloneSetup(deps, herdr, remove);
   const plugin = deps.plugin();
   if (remove) return removePlugin(deps, plugin);
   const activePlugin = pluginListed(deps);
-  if (plugin !== undefined && plugin.version === deps.engineVersion && activePlugin.includes(plugin.version)) return success("Herdr plugin already installed.");
-  if (plugin !== undefined && compareVersions(plugin.version, deps.engineVersion) > 0) return failure(`Plugin ${plugin.version} is newer than engine ${deps.engineVersion}; upgrade Interlock instead of downgrading the plugin.`);
-  const plan = [
-    `herdr detected: ${herdr.path} (${herdr.version})`,
-    "Interlock works fully without the plugin.",
-    ...(plugin === undefined || plugin.version !== deps.engineVersion ? [`Will run: npm install -g ${PLUGIN_NAME}`] : []),
-    "Will run: herdr plugin link <plugin path>",
-    "Will verify: herdr plugin list",
-    "Uninstall: interlock setup --remove",
-  ];
-  if (!flags.includes("--yes")) {
-    if (!deps.isTty()) return { exitCode: 2, stdout: `${plan.join("\n")}\n`, stderr: "Refusing to prompt without a TTY; pass --yes for explicit scriptable consent.\n" };
-    if (deps.prompt("Type yes to continue: ") !== "yes") return success(`${plan.join("\n")}\nnothing was changed`);
-  }
+  const installed = installedPluginResult(deps, plugin, activePlugin);
+  if (installed !== undefined) return installed;
+  const plan = setupPlan(deps, herdr, plugin);
+  const consent = requestConsent(flags, deps, plan);
+  if (consent !== undefined) return consent;
   const output = [...plan];
-  let resolved = plugin;
-  if (resolved === undefined || resolved.version !== deps.engineVersion) {
-    if (resolved !== undefined && activePlugin.includes(resolved.version)) {
-      const unlink = runEchoed(deps, output, "herdr", ["plugin", "unlink", resolved.path]);
-      if (unlink !== undefined) return failure([...output, unlink].join("\n"));
-    }
-    const install = runEchoed(deps, output, "npm", ["install", "-g", PLUGIN_NAME]);
-    if (install !== undefined) return failure([...output, install].join("\n"));
-    resolved = deps.plugin();
-    if (resolved === undefined || resolved.version !== deps.engineVersion) return failure([...output, `Plugin ${PLUGIN_NAME}@${deps.engineVersion} was not resolvable after installation.`].join("\n"));
-  } else output.push(`Plugin package already resolvable at ${resolved.version}; skipping npm install.`);
+  const installation = installPluginPackage(deps, plugin, activePlugin, output);
+  if ("exitCode" in installation) return installation;
+  const resolved = installation;
   const linked = runEchoed(deps, output, "herdr", ["plugin", "link", resolved.path]);
   if (linked !== undefined) return failure([...output, `${linked}\nLink failed. Run \`herdr plugin link ${resolved.path}\` after correcting Herdr, then rerun interlock setup.`].join("\n"));
   if (!pluginActive(deps, herdr, resolved)) return failure([...output, "Activation was not verified by herdr plugin list; no consent record was written."].join("\n"));
@@ -160,14 +134,10 @@ function defaults(overrides: SetupDoctorDependencies): Required<SetupDoctorDepen
     engineVersion: overrides.engineVersion ?? "0.0.4", minimumHerdrVersion: overrides.minimumHerdrVersion ?? DEFAULT_HERDR_FLOOR,
     stateDirectory: overrides.stateDirectory ?? stateDirectory,
     inspectStateDirectory: overrides.inspectStateDirectory ?? (() => inspectStateDirectory((overrides.stateDirectory ?? stateDirectory)(), consentPath())),
-    resolveCommand: overrides.resolveCommand ?? resolveCommand,
-    execute: overrides.execute ?? execute,
-    plugin: overrides.plugin ?? resolvePlugin,
+    ...hostDefaults(overrides),
     readConsent: overrides.readConsent ?? (() => readConsent(consentPath())),
     writeConsent: overrides.writeConsent ?? ((record) => { mkdirSync((overrides.stateDirectory ?? stateDirectory)(), { recursive: true }); writeFileSync(consentPath(), JSON.stringify(record)); }),
     removeConsent: overrides.removeConsent ?? (() => rmSync(consentPath(), { force: true })),
-    isTty: overrides.isTty ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true),
-    prompt: overrides.prompt ?? readConsentAnswer, clock: overrides.clock ?? (() => new Date()),
   };
 }
 
@@ -209,4 +179,76 @@ function readConsentAnswer(question: string): string | undefined {
     bytes.push(buffer[0]!);
   }
   return undefined;
+}
+
+function doctorLines(deps: Required<SetupDoctorDependencies>, herdr: Herdr | null | undefined, consent: ConsentRecord | undefined, active: boolean): string[] {
+  return [
+    `engine: ${deps.engineVersion}`,
+    `state directory: ${deps.stateDirectory()} (${deps.inspectStateDirectory()})`,
+    !isUsableHerdr(herdr) ? "herdr: not detected" : `herdr: ${herdr.path} (${herdr.version}; floor ${deps.minimumHerdrVersion})`,
+    `consent record: ${consent === undefined ? "absent" : `${consent.timestamp} (${consent.pluginVersion})`}`,
+    `plugin link: ${active ? "active" : "not active"}`,
+  ];
+}
+function versionDrift(deps: Required<SetupDoctorDependencies>, herdr: Herdr | null | undefined, plugin: PluginPackage | undefined): boolean {
+  return isUsableHerdr(herdr) && plugin !== undefined && plugin.version !== deps.engineVersion;
+}
+
+function installPluginPackage(deps: Required<SetupDoctorDependencies>, plugin: PluginPackage | undefined, activePlugin: string, output: string[]): PluginPackage | CommandResult {
+  let resolved = plugin;
+  if (resolved === undefined || resolved.version !== deps.engineVersion) {
+    if (resolved !== undefined && activePlugin.includes(resolved.version)) {
+      const unlink = runEchoed(deps, output, "herdr", ["plugin", "unlink", resolved.path]);
+      if (unlink !== undefined) return failure([...output, unlink].join("\n"));
+    }
+    const install = runEchoed(deps, output, "npm", ["install", "-g", PLUGIN_NAME]);
+    if (install !== undefined) return failure([...output, install].join("\n"));
+    resolved = deps.plugin();
+    if (resolved === undefined || resolved.version !== deps.engineVersion) return failure([...output, `Plugin ${PLUGIN_NAME}@${deps.engineVersion} was not resolvable after installation.`].join("\n"));
+  } else output.push(`Plugin package already resolvable at ${resolved.version}; skipping npm install.`);
+  return resolved;
+}
+
+function setupPlan(deps: Required<SetupDoctorDependencies>, herdr: Herdr, plugin: PluginPackage | undefined): string[] {
+  return [
+    `herdr detected: ${herdr.path} (${herdr.version})`,
+    "Interlock works fully without the plugin.",
+    ...(plugin === undefined || plugin.version !== deps.engineVersion ? [`Will run: npm install -g ${PLUGIN_NAME}`] : []),
+    "Will run: herdr plugin link <plugin path>",
+    "Will verify: herdr plugin list",
+    "Uninstall: interlock setup --remove",
+  ];
+}
+function requestConsent(flags: string[], deps: Required<SetupDoctorDependencies>, plan: string[]): CommandResult | undefined {
+  if (!flags.includes("--yes")) {
+    if (!deps.isTty()) return { exitCode: 2, stdout: `${plan.join("\n")}\n`, stderr: "Refusing to prompt without a TTY; pass --yes for explicit scriptable consent.\n" };
+    if (deps.prompt("Type yes to continue: ") !== "yes") return success(`${plan.join("\n")}\nnothing was changed`);
+  }
+  return undefined;
+}
+
+function hostDefaults(overrides: SetupDoctorDependencies): Required<Pick<SetupDoctorDependencies, "resolveCommand" | "execute" | "plugin" | "isTty" | "prompt" | "clock">> {
+  return {
+    resolveCommand: overrides.resolveCommand ?? resolveCommand,
+    execute: overrides.execute ?? execute,
+    plugin: overrides.plugin ?? resolvePlugin,
+    isTty: overrides.isTty ?? (() => process.stdin.isTTY === true && process.stdout.isTTY === true),
+    prompt: overrides.prompt ?? readConsentAnswer, clock: overrides.clock ?? (() => new Date()),
+  };
+}
+
+function standaloneSetup(deps: Required<SetupDoctorDependencies>, herdr: null | undefined, remove: boolean): CommandResult {
+    if (!remove) return success("herdr is not usable; Interlock works standalone. Nothing was changed.");
+    deps.removeConsent();
+    return success(`herdr ${herdr === null ? `not usable: ${herdrReason(deps)}` : "not detected"}; skipped plugin unlink.\nRemoved Interlock's consent record.`);
+}
+
+function installedPluginResult(deps: Required<SetupDoctorDependencies>, plugin: PluginPackage | undefined, activePlugin: string): CommandResult | undefined {
+  if (plugin !== undefined && plugin.version === deps.engineVersion && activePlugin.includes(plugin.version)) return success("Herdr plugin already installed.");
+  if (plugin !== undefined && compareVersions(plugin.version, deps.engineVersion) > 0) return failure(`Plugin ${plugin.version} is newer than engine ${deps.engineVersion}; upgrade Interlock instead of downgrading the plugin.`);
+  return undefined;
+}
+
+function isUsableHerdr(herdr: Herdr | null | undefined): herdr is Herdr {
+  return herdr !== undefined && herdr !== null;
 }

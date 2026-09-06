@@ -1,8 +1,11 @@
 {
   "name": "@raava-solutions/interlock",
-  "version": "0.0.4",
+  "version": "1.0.0",
   "description": "Local coordination for agent sessions: exact-path leases, task claims, pane messaging, and inbox digests.",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/zaycruz/interlock.git" },
+  "bugs": { "url": "https://github.com/zaycruz/interlock/issues" },
+  "homepage": "https://github.com/zaycruz/interlock#readme",
   "engines": {
     "node": ">=22"
   },
@@ -21,6 +24,10 @@
     "./coordination": {
       "types": "./dist/src/coordination/index.d.ts",
       "import": "./dist/src/coordination/index.js"
+    },
+    "./pi": {
+      "types": "./dist/src/pi/index.d.ts",
+      "import": "./dist/src/pi/index.js"
     }
   },
   "bin": {
@@ -28,14 +35,21 @@
     "interlock-mcp": "./dist/src/mcp/main.js"
   },
   "files": [
-    "dist/src"
+    "dist/src",
+    "docs/capabilities.md",
+    "docs/gtm-v1.md",
+    "GOAL.md"
   ],
   "scripts": {
+    "lint": "eslint src test packages/interlock-plugin-herdr/src packages/interlock-plugin-herdr/test scripts --max-warnings 0",
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist/test/core/*.test.js dist/test/contracts/*.test.js dist/test/cli/*.test.js dist/test/beads/*.test.js dist/test/coordination/*.test.js dist/test/mcp/*.test.js",
-    "test:core": "npm run build && node --test dist/test/core/*.test.js"
+    "test": "npm run build && node --test dist/test/core/*.test.js dist/test/contracts/*.test.js dist/test/cli/*.test.js dist/test/beads/*.test.js dist/test/coordination/*.test.js dist/test/mcp/*.test.js dist/test/pi/*.test.js",
+    "test:core": "npm run build && node --test dist/test/core/*.test.js",
+    "test:adapter": "npm run build && node scripts/check-adapter.mjs",
+    "quality:fast": "python3 .engineering/engineering.py check --fast",
+    "quality": "./scripts/quality-gate"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -46,6 +60,8 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.0.0",
+    "@typescript-eslint/parser": "8.69.0",
+    "eslint": "10.10.0",
     "typescript": "^5.9.3"
   }
 }

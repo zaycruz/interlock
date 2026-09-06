@@ -77,19 +77,15 @@ function asIssue(value: unknown): BeadsIssue {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.title !== "string" || typeof value.description !== "string" || typeof value.status !== "string") {
     throw new BeadsCommandError(["show", "--json"], "issue JSON is missing id, title, description, or status");
   }
-  const assignee = value.assignee;
-  if (assignee !== undefined && assignee !== null && typeof assignee !== "string") {
-    throw new BeadsCommandError(["show", "--json"], "issue JSON has an invalid assignee");
-  }
-  const metadataMalformed = Object.hasOwn(value, "metadata") && !isRecord(value.metadata);
-  const metadata = metadataMalformed ? undefined : (isRecord(value.metadata) ? value.metadata : {});
+  const assignee = optionalAssignee(value.assignee);
+  const { metadata, metadataMalformed } = issueMetadata(value);
   return {
     id: value.id,
     title: value.title,
     description: value.description,
     acceptanceCriteria: typeof value.acceptance_criteria === "string" ? value.acceptance_criteria : "",
     status: value.status,
-    assignee: typeof assignee === "string" ? assignee : undefined,
+    assignee,
     metadata,
     metadataMalformed,
   };
@@ -103,3 +99,16 @@ function asDependency(value: unknown): BeadsDependency {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
+function issueMetadata(value: Record<string, unknown>): Pick<BeadsIssue, "metadata" | "metadataMalformed"> {
+  const metadataMalformed = Object.hasOwn(value, "metadata") && !isRecord(value.metadata);
+  const metadata = metadataMalformed ? undefined : (isRecord(value.metadata) ? value.metadata : {});
+  return { metadata, metadataMalformed };
+}
+
+function optionalAssignee(value: unknown): string | undefined {
+  if (value !== undefined && value !== null && typeof value !== "string") {
+    throw new BeadsCommandError(["show", "--json"], "issue JSON has an invalid assignee");
+  }
+  return typeof value === "string" ? value : undefined;
+}

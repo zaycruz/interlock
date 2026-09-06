@@ -215,7 +215,7 @@ test("a file planted at the pending path self-heals on the next sweep", () => {
 // A pane legally named with ".tmp." inside keeps its own record: the stale
 // temp predicate is anchored to the `<x>.json.tmp.` shape, not any ".tmp.".
 test("a pane named with .tmp. inside keeps its record across sweeps", () => {
-  const directory = isolatedState();
+  isolatedState();
   registerPod("eng", ["wT:p1", "run.tmp.2"]);
   json(authorized(["send", "--from-pane", "wT:p1", "--to-pane", "run.tmp.2", "--text", "dotted pane"], "wT:p1"));
   json(runCli(["watch", "--once"]));

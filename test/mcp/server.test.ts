@@ -62,9 +62,9 @@ function cliJson(result: ReturnType<typeof runCli>): Record<string, unknown> {
 }
 
 // Boot a pod with the given members; return one MCP config per pane.
-function bootPod(pod: string, members: string[]): Record<string, McpConfig> {
+function bootPod(pod: string, members: string[], orchestratorToken?: string): Record<string, McpConfig> {
   const directory = process.env.INTERLOCK_STATE_DIR!;
-  const orchestrator = String(cliJson(runCli(["orchestrator", "init"])).token);
+  const orchestrator = orchestratorToken ?? String(cliJson(runCli(["orchestrator", "init"])).token);
   const template = join(directory, `template-${pod}.json`);
   writeFileSync(template, JSON.stringify({ members, leader: members[0], succession: [...members] }));
   const created = cliJson(runCli(["pod", "create", "--name", pod, "--template", template, "--orchestrator-token", orchestrator]));
@@ -81,6 +81,7 @@ async function connect(config: McpConfig): Promise<Client> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createInterlockMcpServer(config, [], "0.0.0");
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  await client.listTools();
   return client;
 }
 
@@ -96,7 +97,9 @@ function toolText(result: CallToolResult): string {
 
 function payload(result: CallToolResult): Record<string, unknown> {
   assert.notEqual(result.isError, true, "call must succeed: " + toolText(result));
-  return record(JSON.parse(toolText(result)));
+  const value = record(JSON.parse(toolText(result)));
+  assert.deepEqual(result.structuredContent, value, "structured and text results describe the same outcome");
+  return value;
 }
 
 function errorText(result: CallToolResult): string {
@@ -104,14 +107,13 @@ function errorText(result: CallToolResult): string {
   return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
-// R2: exactly five tools; anything the MCP surface does not expose, the agent
-// does not do.
-test("the registry lists exactly the five coordination tools", async () => {
+// The registry includes worker discovery without deployment administration.
+test("the registry exposes messaging and the complete worker task lifecycle", async () => {
   isolatedState();
   const configs = bootPod("eng", ["wT:p1", "wT:p4"]);
   const client = await connect(configs["wT:p1"]!);
   const tools = await client.listTools();
-  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["inbox_claim", "inbox_close", "inbox_list", "inbox_summary", "message_send"]);
+  assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["channel_close", "channel_list", "channel_open", "pod_inspect", "pod_list", "inbox_claim", "inbox_close", "inbox_list", "inbox_summary", "message_send", "task_block", "task_checkpoint", "task_claim", "task_complete", "task_create", "task_heartbeat", "task_inspect", "task_list", "task_progress", "task_recover", "task_release", "task_resolve", "task_resume", "task_update", "task_withdraw"].sort());
 });
 
 // R3/R8: the MCP answer is the CLI answer — same bytes, same state.
@@ -251,7 +253,7 @@ test("tool errors carry the CLI stderr text verbatim", async () => {
 
 // AE7 baseline: the compiled bin completes a real stdio handshake and answers
 // tools/list, so any stdio host (Codex, Claude Code, OMP) can wire it.
-test("the stdio bin answers initialize and tools/list", async () => {
+test("the stdio bin answers initialize and tools/list", async (t) => {
   const directory = isolatedState();
   const configs = bootPod("eng", ["wT:p1", "wT:p4"]);
   runCli(["send", "--from-pane", "wT:p1", "--to-pane", "wT:p4", "--text", "seed over stdio", "--token", configs["wT:p1"]!.token!]);
@@ -259,6 +261,7 @@ test("the stdio bin answers initialize and tools/list", async () => {
 
   const binPath = fileURLToPath(new URL("../../src/mcp/main.js", import.meta.url));
   const client = new Client({ name: "interlock-stdio-test", version: "0.0.0" });
+  t.after(() => client.close());
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [binPath],
@@ -266,7 +269,7 @@ test("the stdio bin answers initialize and tools/list", async () => {
   });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 5);
+  assert.equal(tools.tools.length, 25);
   const body = payload(await callTool(client, "inbox_list", {}));
   assert.equal(list(body.messages).length, 1, "the seeded send is visible over stdio");
   await client.close();
@@ -278,6 +281,7 @@ async function connectUnconfigured(problems: string[]): Promise<Client> {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const server = createInterlockMcpServer(null, problems, "0.0.0");
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  await client.listTools();
   return client;
 }
 
@@ -300,7 +304,7 @@ test("an unconfigured server still lists tools and fails each call by name", asy
   const { problems } = readMcpConfig({});
   const client = await connectUnconfigured(problems);
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 5, "tools/list works during host setup");
+  assert.equal(tools.tools.length, 25, "tools/list works during host setup");
   const text = errorText(await callTool(client, "inbox_summary", {}));
   assert.match(text, /INTERLOCK_PANE is not set/);
 });
@@ -350,4 +354,39 @@ test("message_send delivers dash-prefixed text verbatim", async () => {
   const sender = await connect(configs["wT:p1"]!);
   const sent = payload(await callTool(sender, "message_send", { to: "wT:p4", text: "--reply 1 --channel 9" }));
   assert.equal(record(sent.message).text, "--reply 1 --channel 9");
+});
+
+
+test("leaders discover recipients and coordinate through MCP channels while workers cannot open them", async () => {
+  isolatedState();
+  const eng = bootPod("eng", ["lead", "worker"]);
+  const orchestrator = String(cliJson(runCli(["orchestrator", "init", "--rotate"])).token);
+  const ops = bootPod("ops", ["ops-lead"], orchestrator);
+  const leader = await connect(eng.lead!);
+  const worker = await connect(eng.worker!);
+  const recipient = await connect(ops["ops-lead"]!);
+  try {
+    const pods = payload(await callTool(leader, "pod_list", {}));
+    assert.deepEqual(list(pods.pods).map((item) => record(item).name), ["eng", "ops"]);
+    const inspected = payload(await callTool(leader, "pod_inspect", { pod: "ops" }));
+    const member = record(list(inspected.members)[0]);
+    assert.equal(member.member, "ops-lead");
+    assert.equal(member.role, "leader");
+    assert.equal(inspected.tokens, undefined);
+    const forbidden = await callTool(worker, "channel_open", { pod: "eng", to_pod: "ops", topic: "Review" });
+    assert.match(errorText(forbidden), /leader/i);
+    const opened = payload(await callTool(leader, "channel_open", { pod: "eng", to_pod: "ops", topic: "Review" }));
+    const channel = record(opened.channel);
+    const sent = payload(await callTool(leader, "message_send", { to: member.member, text: "Please review", channel: channel.id }));
+    assert.equal(record(sent.message).toPane, "ops-lead");
+    const inbox = payload(await callTool(recipient, "inbox_list", {}));
+    assert.equal(record(list(inbox.messages)[0]).text, "Please review");
+    const listed = payload(await callTool(leader, "channel_list", { pod: "eng" }));
+    assert.equal(record(list(listed.channels)[0]).messageCount, 1);
+    assert.match(errorText(await callTool(worker, "channel_close", { channel: channel.id })), /leader/i);
+    const closed = payload(await callTool(leader, "channel_close", { channel: channel.id }));
+    assert.equal(typeof record(closed.channel).closedAt, "string");
+  } finally {
+    await Promise.all([leader.close(), worker.close(), recipient.close()]);
+  }
 });

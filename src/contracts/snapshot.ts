@@ -52,12 +52,9 @@ export function buildInterlockSnapshot(
   const terminal = issue.status === "closed";
   const metadata = issue.metadata === undefined ? undefined : interlockMetadata(issue.metadata);
   const hasInterlockMetadata = issue.metadata !== undefined && Object.hasOwn(issue.metadata, "interlock");
-  const activeAssignment = !terminal && isNonEmpty(issue.assignee);
-  const activeMetadata = !terminal && issue.status === "in_progress" && metadata !== undefined;
-  const claimed = activeAssignment || activeMetadata;
+  const claimed = isClaimed(issue, metadata, terminal);
   const heartbeatAt = newestHeartbeat(metadata?.leaseHealth.heartbeatAt, lease?.heartbeatAt);
-  const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
-  if (!Number.isFinite(staleAfterMs) || staleAfterMs < 0) throw new RangeError("staleAfterMs must be a non-negative finite number");
+  const staleAfterMs = staleThreshold(options);
 
   return {
     id: issue.id,
@@ -69,7 +66,7 @@ export function buildInterlockSnapshot(
     stage: issue.status,
     blocker: snapshotBlocker(issue, metadata, lease, hasInterlockMetadata, terminal),
     lastProgressAt: heartbeatAt === undefined ? null : new Date(heartbeatAt).toISOString(),
-    stale: claimed && !terminal && heartbeatAt !== undefined && (options.clock ?? Date.now)() - heartbeatAt > staleAfterMs,
+    stale: isStale(claimed, terminal, heartbeatAt, staleAfterMs, options),
     terminal,
     source: "beads",
     revision: null,
@@ -88,15 +85,14 @@ function snapshotBlocker(
   if (!hasInterlockMetadata) return lease === undefined ? null : "local-only contract; Beads metadata is absent";
   if (metadata === undefined) return "Beads metadata is malformed";
   if (terminal) return lease === undefined ? null : "closed Beads issue retains a local Interlock contract";
+  return activeContractBlocker(issue, metadata, lease);
+}
+
+function activeContractBlocker(issue: BeadsIssue, metadata: NonNullable<ReturnType<typeof interlockMetadata>>, lease: LeaseState | undefined): string | null {
   if (issue.status !== "in_progress") return `remote contract is inactive (${issue.status})`;
   if (issue.assignee !== metadata.actor) return `remote contract is reassigned (${issue.assignee ?? "unassigned"})`;
   if (lease === undefined) return "remote-only active contract";
-  if (lease.workContractId !== metadata.contractId || !lease.remoteConfirmed || lease.completing
-    || lease.owner.actor !== metadata.actor || lease.owner.beadId !== issue.id
-    || lease.owner.process.pid !== metadata.session.pid || lease.owner.process.startedAt !== metadata.session.startedAt
-    || !samePaths(lease.paths, normalizedMetadataPaths(metadata))) {
-    return "local/Beads scope or owner mismatch";
-  }
+  if (leaseMismatch(issue, metadata, lease)) return "local/Beads scope or owner mismatch";
   if (lease.heartbeatAt !== metadata.leaseHealth.heartbeatAt) return "local/Beads heartbeat metadata mismatch";
   return null;
 }
@@ -120,3 +116,23 @@ function firstNonEmpty(...values: Array<string | undefined>): string | null {
 
 function isNonEmpty(value: string | undefined): value is string { return typeof value === "string" && value.trim() !== ""; }
 function samePaths(left: string[], right: string[]): boolean { return left.length === right.length && left.every((path, index) => path === right[index]); }
+
+function isClaimed(issue: BeadsIssue, metadata: ReturnType<typeof interlockMetadata>, terminal: boolean): boolean {
+  const activeAssignment = !terminal && isNonEmpty(issue.assignee);
+  const activeMetadata = !terminal && issue.status === "in_progress" && metadata !== undefined;
+  return activeAssignment || activeMetadata;
+}
+function staleThreshold(options: InterlockSnapshotOptions): number {
+  const value = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  if (!Number.isFinite(value) || value < 0) throw new RangeError("staleAfterMs must be a non-negative finite number");
+  return value;
+}
+function isStale(claimed: boolean, terminal: boolean, heartbeatAt: number | undefined, threshold: number, options: InterlockSnapshotOptions): boolean {
+  return claimed && !terminal && heartbeatAt !== undefined && (options.clock ?? Date.now)() - heartbeatAt > threshold;
+}
+function leaseMismatch(issue: BeadsIssue, metadata: NonNullable<ReturnType<typeof interlockMetadata>>, lease: LeaseState): boolean {
+  return lease.workContractId !== metadata.contractId || !lease.remoteConfirmed || lease.completing
+    || lease.owner.actor !== metadata.actor || lease.owner.beadId !== issue.id
+    || lease.owner.process.pid !== metadata.session.pid || lease.owner.process.startedAt !== metadata.session.startedAt
+    || !samePaths(lease.paths, normalizedMetadataPaths(metadata));
+}

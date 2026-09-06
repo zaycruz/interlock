@@ -1,17 +1,21 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 
-import { appointPod, assertMessageStageTransition, assertNotDoneLeader, assertTaskStageTransition, closeLeaderChannel, closePod, createPod, evaluatePreSend, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
+import { has, optional, optionalNumber, parseArgs, required, requiredToken } from "./args.js";
+import { deliverDigests } from "./digest.js";
+import { inboxSummary } from "./inbox-summary.js";
+import { sendCommand } from "./message-send.js";
+import { taskCommand } from "./task-commands.js";
+import { appointPod, assertMessageStageTransition, closeLeaderChannel, closePod, createPod, evaluateSuccession, openLeaderChannel, parsePodTemplate, rebindMemberProcess, recordLeaderDone } from "./pods.js";
 import { buildDashboardView, renderDashboard } from "./render.js";
-import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDelivery, writeDigestDeliveryFile } from "./state.js";
-import type { CoordinationMessage, CoordinationState, CoordinationTask, DigestDelivery, MessageStage, SessionState, TaskStage } from "./types.js";
-import { validateMemberName, validatePaneName, validateTaskId } from "./validation.js";
+import { assertMemberToken, assertOrchestratorToken, migrateLegacyCoordinationState, ORCHESTRATOR_MEMBER, provisionOrchestrator, readCoordinationState, registerMemberToken, withCoordinationLock, writeDigestDeliveryFile } from "./state.js";
+import type { CoordinationMessage, CoordinationState, MessageStage, SessionState } from "./types.js";
+import { validateMemberName, validatePaneName } from "./validation.js";
 import { sessionProcessIdentityFor } from "../core/process-identity.js";
 import { refreshAllPendingStatus, refreshPendingStatus } from "./pending-status.js";
 
 export interface CoordinationCliResult { exitCode: number; stdout: string; stderr: string; }
 
 const COMMANDS = new Set(["task", "send", "inbox", "session", "watch", "dashboard", "compact", "orchestrator", "state", "pod"]);
-const TASK_STAGES: TaskStage[] = ["open", "claimed", "in-progress", "blocked", "done", "closed"];
 
 export function runCoordinationCli(argv: string[]): CoordinationCliResult | null {
   if (!COMMANDS.has(argv[0] ?? "")) return null;
@@ -24,18 +28,38 @@ export function runCoordinationCli(argv: string[]): CoordinationCliResult | null
 
 export function coordinationUsage(): string[] {
   return [
-    "  interlock session register --pane <pane> --token <token>",
-    "  interlock task add --id <id> --title <title> --value <business-value> --pane <pane> --token <token> [--workspace <ws>] [--owner-pane <pane>]",
+    "  Set INTERLOCK_PANE_TOKEN for authenticated commands. Use --token <token> to override it.",
+    "  interlock session register --pane <pane>",
+    "  interlock task add --id <id> --title <title> --value <business-value> --pane <pane> [--workspace <path>] [--owner-pane <pane>]",
+    "  interlock task add --id <id> --pane <pane> --workspace <worktree> --contract <json> [--owner-pane <pane>]",
+    "    Contract JSON: {\"beadId\":\"issue-id\",\"paths\":[\"src/file.ts\"],\"checks\":[{\"criterion\":\"Exact acceptance item\",\"command\":[\"npm\",\"test\"],\"timeoutMs\":300000}]}",
+    "    Beads supplies the linked title, value, and acceptance. Use exact repository-relative paths.",
     "  interlock task list [--json]",
-    "  interlock task claim <id> --pane <pane> --token <token>",
-    "  interlock task progress <id> --pane <pane> --token <token>",
-    "  interlock task stage <id> <open|claimed|in-progress|blocked|done|closed> --pane <pane> --token <token>",
-    "  interlock task reap <id> --pane <operator-pane> --token <token> --dead-claimer <pane>  (claimer session must be done)",
-    "  interlock send --from-pane <pane> --to-pane <pane> --token <token> --text <text> [--workspace <ws>] [--reply <message-id>] [--channel <channel-id>]",
-    "  interlock inbox --pane <pane> --token <token> [--all] [--json]",
-    "  interlock inbox claim --message <id> --pane <pane> --token <token>",
-    "  interlock inbox close --message <id> --pane <pane> --token <token>",
-    "  interlock session set --pane <pane> --token <token> --state <idle|busy|done>",
+    "  interlock task inspect <id> --pane <pane>",
+    "  interlock task resume [id] --pane <pane>",
+    "  interlock task claim <id> --pane <pane> [--session-pid <pid>]  (linked tasks require the caller or ancestor PID)",
+    "  interlock task progress <id> --pane <pane>",
+    "  interlock task checkpoint <id> --pane <pane> --text <checkpoint>",
+    "  interlock task block <id> --pane <pane> --reason <reason>",
+    "  interlock task heartbeat <id> --pane <pane> [--contract-id <id>]  (linked execution)",
+    "  interlock task complete <id> --pane <pane> [--contract-id <id>] [--result <json>]",
+    "    Linked completion requires result JSON: {\"summary\":\"Result\",\"artifacts\":[\"path-or-url\"]}. Captured checks must pass.",
+    "  interlock task release <id> --pane <pane> [--contract-id <id>] [--reason <reason>]  (linked release requires a reason)",
+    "  interlock task resolve <id> --pane <pane> [--contract-id <id>]  (resolve a pending linked operation)",
+    "  interlock task recover <id> --pane <pane> [--contract-id <id>] [--reason <reason>]  (requires verified execution death)",
+    "  interlock task update <id> --pane <pane> --revision <n> [--title <title>] [--value <value>] [--workspace <path>] [--owner-pane <pane>] [--contract <json>]",
+    "  interlock task withdraw <id> --pane <pane> --revision <n> --reason <reason>",
+    "    Update and withdraw require open unclaimed work. Read the current revision with task inspect.",
+    "  interlock task stage <id> <open|claimed|in-progress|blocked|done|closed> --pane <pane>  (linked tasks permit only in-progress or blocked)",
+    "  interlock task reap <id> --pane <operator-pane> --dead-claimer <pane>  (unlinked tasks; claimer session must be done)",
+    "  interlock send --from-pane <pane> (--to-pane <pane> | --reply <message-id>) --text <text> [--workspace <ws>] [--channel <id>] [--task <id>] [--request-id <key>]",
+    "    Reuse a request ID only for the same payload. Replies inherit the task.",
+    "  interlock inbox --pane <pane> [--all] [--thread <id>] [--task <id>] [--json]",
+    "    Thread and task filters include terminal history addressed to this pane.",
+    "  interlock inbox summary --pane <pane>  (read-only counts and at most 20 digest pointers)",
+    "  interlock inbox claim --message <id> --pane <pane>",
+    "  interlock inbox close --message <id> --pane <pane>",
+    "  interlock session set --pane <pane> --state <idle|busy|done>",
     "  interlock watch --once",
     "  interlock dashboard --once [--json]",
     "  interlock compact",
@@ -44,11 +68,11 @@ export function coordinationUsage(): string[] {
     "  interlock pod create --name <pod> --template <file> --orchestrator-token <token>  (member tokens are printed once)",
     "  interlock pod appoint --pod <pod> (--leader <member> | --member <name> [--role <leader|worker>] [--no-succession]) --orchestrator-token <token>",
     "  interlock pod close --pod <pod> --orchestrator-token <token>",
-    "  interlock pod rebind --member <member> --token <token> [--pid <pid>]  (verified-dead identity only; binds the caller or an ancestor process)",
+    "  interlock pod rebind --member <member> [--pid <pid>]  (verified-dead identity only; binds the caller or an ancestor process)",
     "  interlock pod list [--json]",
     "  interlock pod show --pod <pod> [--json]",
-    "  interlock pod channel open --pod <pod> --to-pod <pod> --member <leader> --token <token> --topic <topic>  (topic required, max 140 chars)",
-    "  interlock pod channel close --channel <id> --member <leader> --token <token>",
+    "  interlock pod channel open --pod <pod> --to-pod <pod> --member <leader> --topic <topic>  (topic required, max 140 chars)",
+    "  interlock pod channel close --channel <id> --member <leader>",
     "  interlock pod channel list [--pod <pod>] [--json]",
     "  interlock pod awareness [--pod <pod>] [--json]  (metadata-only feed; never message content)",
   ];
@@ -60,6 +84,11 @@ function execute(argv: string[]): string {
   if (command === "send") return sendCommand(argv.slice(1));
   if (command === "inbox") return inboxCommand(argv.slice(1));
   if (command === "session") return sessionCommand(argv.slice(1));
+  return maintenanceCommand(argv);
+}
+
+function maintenanceCommand(argv: string[]): string {
+  const command = argv[0];
   if (command === "watch") return watchCommand(argv.slice(1));
   if (command === "dashboard") return dashboardCommand(argv.slice(1));
   if (command === "compact") return compactCommand();
@@ -74,79 +103,90 @@ function podCommand(argv: string[]): string {
   if (subcommand === "channel") return channelCommand(argv.slice(1));
   if (subcommand === "awareness") return awarenessCommand(argv.slice(1));
   const parsed = parseArgs(argv.slice(1));
-  if (subcommand === "create") {
-    const name = required(parsed, "name");
-    const template = readPodTemplate(required(parsed, "template"));
-    const orchestratorToken = required(parsed, "orchestrator-token");
-    const created = withCoordinationLock((state) => {
-      assertOrchestratorToken(state, orchestratorToken);
-      return createPod(state, name, template);
-    });
-    return JSON.stringify({ ok: true, ...created, notice: "member tokens are printed exactly once; distribute them to member processes out of band" });
-  }
-  if (subcommand === "close") {
-    const name = required(parsed, "pod");
-    const orchestratorToken = required(parsed, "orchestrator-token");
-    const closed = withCoordinationLock((state) => {
-      assertOrchestratorToken(state, orchestratorToken);
-      const result = closePod(state, name);
-      // Closing deregisters members; converge the nudge files now so no
-      // dead pane advertises pending work until the next watch.
-      refreshAllPendingStatus(state);
-      return result;
-    });
-    return JSON.stringify({ ok: true, ...closed });
-  }
-  if (subcommand === "appoint") {
-    const name = required(parsed, "pod");
-    const orchestratorToken = required(parsed, "orchestrator-token");
-    const leader = optional(parsed, "leader");
-    const member = optional(parsed, "member");
-    if ((leader === null) === (member === null)) throw new Error("pod appoint requires exactly one of --leader or --member");
-    if (leader !== null && (has(parsed, "role") || has(parsed, "no-succession"))) throw new Error("--role and --no-succession apply only when adding --member");
-    const role = optional(parsed, "role") ?? "worker";
-    if (role !== "leader" && role !== "worker") throw new Error("--role must be leader or worker");
-    const appointed = withCoordinationLock((state) => {
-      assertOrchestratorToken(state, orchestratorToken);
-      return leader !== null
-        ? appointPod(state, name, { leader })
-        : appointPod(state, name, { member: member!, role, succession: !has(parsed, "no-succession") });
-    });
-    return JSON.stringify({ ok: true, ...appointed, notice: Object.keys(appointed.tokens).length === 0 ? undefined : "member tokens are printed exactly once; distribute them to member processes out of band" });
-  }
-  if (subcommand === "rebind") {
-    const member = validateMemberName(required(parsed, "member"));
-    const token = requiredToken(parsed);
-    // ADR 0003 D6 (MF-A): the rebind binds the calling process's own identity
-    // engine-side. An optional --pid names the caller or one of its ancestors
-    // (the il-8o3 session guard); a foreign pid is rejected, so a stolen token
-    // can never pin the member to an unrelated or immortal process.
-    const pidArg = optionalNumber(parsed, "pid");
-    const identity = pidArg === undefined ? sessionProcessIdentityFor(process.pid) : sessionProcessIdentityFor(pidArg);
-    const rebound = withCoordinationLock((state) => {
-      assertMemberToken(state, member, token);
-      return rebindMemberProcess(state, member, identity);
-    });
-    return JSON.stringify({ ok: true, member: rebound });
-  }
-  // Read-only views, same posture as the dashboard: no token, no mutation.
-  if (subcommand === "list") {
-    const state = readCoordinationState();
-    if (has(parsed, "json")) return JSON.stringify({ ok: true, pods: state.pods });
-    return state.pods.map((pod) => `${pod.name} | ${pod.status} | leader ${pod.leader} | members ${state.podMembers.filter((member) => member.pod === pod.name).length}`).join("\n") || "(no pods)";
-  }
-  if (subcommand === "show") {
-    const name = required(parsed, "pod");
-    const state = readCoordinationState();
-    const pod = state.pods.find((candidate) => candidate.name === name);
-    if (pod === undefined) throw new Error("unknown pod " + name);
-    const members = state.podMembers.filter((member) => member.pod === name);
-    if (has(parsed, "json")) return JSON.stringify({ ok: true, pod, members });
-    const lines = [`POD ${pod.name} | ${pod.status} | leader ${pod.leader} | succession ${pod.succession.join(", ")}`];
-    for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
-    return lines.join("\n");
-  }
+  if (subcommand === "create") return createPodCommand(parsed);
+  if (subcommand === "close") return closePodCommand(parsed);
+  if (subcommand === "appoint") return appointPodCommand(parsed);
+  if (subcommand === "rebind") return rebindPodCommand(parsed);
+  if (subcommand === "list") return listPodCommand(parsed);
+  if (subcommand === "show") return showPodCommand(parsed);
   throw new Error("pod requires create, appoint, close, rebind, list, or show");
+}
+
+function createPodCommand(parsed: ReturnType<typeof parseArgs>): string {
+  const name = required(parsed, "name");
+  const template = readPodTemplate(required(parsed, "template"));
+  const orchestratorToken = required(parsed, "orchestrator-token");
+  const created = withCoordinationLock((state) => {
+    assertOrchestratorToken(state, orchestratorToken);
+    return createPod(state, name, template);
+  });
+  return JSON.stringify({ ok: true, ...created, notice: "member tokens are printed exactly once; distribute them to member processes out of band" });
+}
+
+function closePodCommand(parsed: ReturnType<typeof parseArgs>): string {
+  const name = required(parsed, "pod");
+  const orchestratorToken = required(parsed, "orchestrator-token");
+  const closed = withCoordinationLock((state) => {
+    assertOrchestratorToken(state, orchestratorToken);
+    const result = closePod(state, name);
+    // Closing deregisters members; converge the nudge files now so no
+    // dead pane advertises pending work until the next watch.
+    refreshAllPendingStatus(state);
+    return result;
+  });
+  return JSON.stringify({ ok: true, ...closed });
+}
+
+function appointPodCommand(parsed: ReturnType<typeof parseArgs>): string {
+  const name = required(parsed, "pod");
+  const orchestratorToken = required(parsed, "orchestrator-token");
+  const leader = optional(parsed, "leader");
+  const member = optional(parsed, "member");
+  if ((leader === null) === (member === null)) throw new Error("pod appoint requires exactly one of --leader or --member");
+  if (leader !== null && (has(parsed, "role") || has(parsed, "no-succession"))) throw new Error("--role and --no-succession apply only when adding --member");
+  const role = optional(parsed, "role") ?? "worker";
+  if (role !== "leader" && role !== "worker") throw new Error("--role must be leader or worker");
+  const appointed = withCoordinationLock((state) => {
+    assertOrchestratorToken(state, orchestratorToken);
+    return leader !== null
+      ? appointPod(state, name, { leader })
+      : appointPod(state, name, { member: member!, role, succession: !has(parsed, "no-succession") });
+  });
+  return JSON.stringify({ ok: true, ...appointed, notice: Object.keys(appointed.tokens).length === 0 ? undefined : "member tokens are printed exactly once; distribute them to member processes out of band" });
+}
+
+function rebindPodCommand(parsed: ReturnType<typeof parseArgs>): string {
+  const member = validateMemberName(required(parsed, "member"));
+  const token = requiredToken(parsed);
+  // ADR 0003 D6 (MF-A): the rebind binds the calling process's own identity
+  // engine-side. An optional --pid names the caller or one of its ancestors
+  // (the il-8o3 session guard); a foreign pid is rejected, so a stolen token
+  // can never pin the member to an unrelated or immortal process.
+  const pidArg = optionalNumber(parsed, "pid");
+  const identity = pidArg === undefined ? sessionProcessIdentityFor(process.pid) : sessionProcessIdentityFor(pidArg);
+  const rebound = withCoordinationLock((state) => {
+    assertMemberToken(state, member, token);
+    return rebindMemberProcess(state, member, identity);
+  });
+  return JSON.stringify({ ok: true, member: rebound });
+}
+
+function listPodCommand(parsed: ReturnType<typeof parseArgs>): string {
+  const state = readCoordinationState();
+  if (has(parsed, "json")) return JSON.stringify({ ok: true, pods: state.pods });
+  return state.pods.map((pod) => `${pod.name} | ${pod.status} | leader ${pod.leader} | members ${state.podMembers.filter((member) => member.pod === pod.name).length}`).join("\n") || "(no pods)";
+}
+
+function showPodCommand(parsed: ReturnType<typeof parseArgs>): string {
+  const name = required(parsed, "pod");
+  const state = readCoordinationState();
+  const pod = state.pods.find((candidate) => candidate.name === name);
+  if (pod === undefined) throw new Error("unknown pod " + name);
+  const members = state.podMembers.filter((member) => member.pod === name);
+  if (has(parsed, "json")) return JSON.stringify({ ok: true, pod, members });
+  const lines = [`POD ${pod.name} | ${pod.status} | leader ${pod.leader} | succession ${pod.succession.join(", ")}`];
+  for (const member of members) lines.push(`${member.member} | ${member.role} | registered ${member.registeredAt}`);
+  return lines.join("\n");
 }
 
 function channelCommand(argv: string[]): string {
@@ -240,154 +280,8 @@ function stateCommand(argv: string[]): string {
   return JSON.stringify({ ok: true, pod: migrated.pod, members: migrated.members });
 }
 
-function taskCommand(argv: string[]): string {
-  const subcommand = argv[0];
-  const parsed = parseArgs(argv.slice(1));
-  if (subcommand === "add") {
-    const id = validateTaskId(required(parsed, "id"));
-    const pane = validatePaneName(required(parsed, "pane"));
-    const token = requiredToken(parsed);
-    const task = withCoordinationLock((state) => {
-      assertMemberToken(state, pane, token);
-      assertNotDoneLeader(state, pane, "task add");
-      if (state.tasks.some((candidate) => candidate.id === id)) throw new Error(`task ${id} already exists`);
-      const now = new Date().toISOString();
-      const ownerPane = optional(parsed, "owner-pane");
-      if (ownerPane !== null) validatePaneName(ownerPane, "owner pane");
-      const task: CoordinationTask = { id, title: required(parsed, "title"), businessValue: required(parsed, "value"), workspace: optional(parsed, "workspace"), ownerPane, stage: "open", claimer: null, blocker: null, createdAt: now, lastProgressAt: now, revision: 1 };
-      state.tasks.push(task);
-      return task;
-    });
-    return JSON.stringify({ ok: true, task });
-  }
-  if (subcommand === "list") {
-    const state = readCoordinationState();
-    if (has(parsed, "json")) return JSON.stringify({ ok: true, tasks: state.tasks });
-    return state.tasks.map((task) => `${task.id} | ${task.stage} | ${task.claimer ?? "unclaimed"} | ${task.businessValue} | ${task.title}`).join("\n") || "(no tasks)";
-  }
-  const id = validateTaskId(argv[1] ?? "");
-  if (!id) throw new Error(`task ${subcommand ?? ""} requires an id`);
-  const pane = validatePaneName(required(parsed, "pane"));
-  const token = requiredToken(parsed);
-  if (subcommand === "reap" || subcommand === "release") {
-    const deadClaimer = validatePaneName(required(parsed, "dead-claimer"), "dead claimer");
-    const task = withCoordinationLock((state) => {
-      assertMemberToken(state, pane, token);
-      if (deadClaimer === pane) throw new Error("operator pane cannot reap itself");
-      const candidate = findTask(state, id);
-      if (candidate.claimer !== deadClaimer) throw new Error("task " + id + " is not claimed by " + deadClaimer);
-      const session = state.sessions.find((value) => value.pane === deadClaimer);
-      if (session === undefined) throw new Error("dead claimer " + deadClaimer + " has no registered session");
-      // Staleness is never a death input: lastSeenAt only advances on session set,
-      // so a live but quiet claimer would be wrongfully displaced. Reap requires
-      // the claimer session to be verifiably finished (state done).
-      if (session.state !== "done") throw new Error("dead claimer " + deadClaimer + " must be done before reap");
-      // il-2t8: reap returns live work to open through the same matrix as
-      // every other stage move — a done or closed task is terminal and is
-      // never resurrected, even for a finished claimer.
-      assertTaskStageTransition(id, candidate.stage, "open");
-      candidate.claimer = null;
-      candidate.stage = "open";
-      candidate.blocker = null;
-      candidate.revision += 1;
-      candidate.lastProgressAt = new Date().toISOString();
-      return { ...candidate, reapReason: "session-done" };
-    });
-    return JSON.stringify({ ok: true, task });
-  }
-  if (subcommand === "claim") {
-    return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
-      assertMemberToken(state, pane, token);
-      assertNotDoneLeader(state, pane, "task claim");
-      const task = findTask(state, id);
-      if (task.stage !== "open" || task.claimer !== null) {
-        throw new Error(`claim_conflict: task ${id} is ${task.stage}, claimed by ${task.claimer ?? "unknown"} (revision ${task.revision})`);
-      }
-      task.claimer = pane; task.stage = "claimed"; task.revision += 1; task.lastProgressAt = new Date().toISOString();
-      return { ...task };
-    }) });
-  }
-  if (subcommand === "progress") {
-    return JSON.stringify({ ok: true, task: withCoordinationLock((state) => {
-      assertMemberToken(state, pane, token);
-      assertNotDoneLeader(state, pane, "task progress");
-      const task = ownedTask(state, id, pane); if (task.stage === "claimed") task.stage = "in-progress"; task.revision += 1; task.lastProgressAt = new Date().toISOString(); return { ...task };
-    }) });
-  }
-  if (subcommand === "stage") {
-    const stage = argv[2] as TaskStage | undefined;
-    if (!stage || !TASK_STAGES.includes(stage)) throw new Error(`task stage must be one of ${TASK_STAGES.join("|")}`);
-    const result = withCoordinationLock((state) => {
-      assertMemberToken(state, pane, token);
-      assertNotDoneLeader(state, pane, "task stage");
-      const task = ownedTask(state, id, pane);
-      // il-2t8: the owner drives the task along the transition matrix; jumps
-      // that reopen terminal work or manufacture claims are refused.
-      assertTaskStageTransition(id, task.stage, stage);
-      // A transition back to open is a release: the claim leaves with the
-      // stage, so the reopened task can actually be claimed again.
-      if (stage === "open") { task.claimer = null; task.blocker = null; }
-      if (stage === "blocked") task.blocker = "declared by " + pane;
-      task.stage = stage; task.revision += 1; task.lastProgressAt = new Date().toISOString();
-      const digests = stage === "done" ? deliverDigests(state, "task-done") : [];
-      return { task: { ...task }, digests };
-    });
-    return JSON.stringify({ ok: true, ...result });
-  }
-  throw new Error(`unknown task command: ${subcommand}`);
-}
-
-function sendCommand(argv: string[]): string {
-  const parsed = parseArgs(argv);
-  const result = withCoordinationLock((state) => {
-    const fromPane = validatePaneName(required(parsed, "from-pane"), "sender pane");
-    assertMemberToken(state, fromPane, requiredToken(parsed));
-    const replyTo = optionalNumber(parsed, "reply");
-    const parent = replyTo === undefined ? undefined : state.messages.find((message) => message.id === replyTo);
-    if (replyTo !== undefined && parent === undefined) throw new Error(`unknown message #${replyTo}`);
-    if (parent && parent.toPane !== fromPane) throw new Error("reply sender " + fromPane + " is not the addressed pane " + parent.toPane);
-    const toPane = parent?.fromPane ?? validatePaneName(required(parsed, "to-pane"), "recipient pane");
-    const channelId = optionalNumber(parsed, "channel");
-    // ADR 0003 D4: the routing boundary is enforced by mechanism, immediately
-    // after token authentication and before any state mutation, through the
-    // single pre-send evaluation seam (see evaluatePreSend in pods.ts).
-    evaluatePreSend(state, fromPane, toPane, channelId);
-    const id = state.nextMessageId++;
-    const now = new Date().toISOString();
-    const message: CoordinationMessage = { id, threadId: parent?.threadId ?? id, replyTo: replyTo ?? null, fromPane, toPane, workspace: optional(parsed, "workspace"), text: required(parsed, "text"), state: "queued", claimer: null, createdAt: now };
-    let parentHandoff = false;
-    if (parent && (parent.state === "queued" || parent.state === "claimed")) {
-      // A reply hands the thread back: the parent moves queued/claimed ->
-      // handled, which the message matrix already permits.
-      assertMessageStageTransition(parent.id, parent.state, "handled");
-      parent.state = "handled";
-      parentHandoff = true;
-    }
-    state.messages.push(message);
-    // The send cleared the boundary: a channel send counts toward the channel's
-    // closing message count (R11). Intra-pod sends never carry a channel id.
-    if (channelId !== undefined) {
-      const channel = state.leaderChannels.find((candidate) => candidate.id === channelId)!;
-      channel.messageCount += 1;
-    }
-    const digests = deliverDigests(state, "watcher-heartbeat");
-    // U1: refresh the nudges inside the lock, after every mutation, so the
-    // file can never carry a count the state did not commit — but as the
-    // advisory channel R13 defines it: a failed record write must never
-    // fail the send (state is already committed here with commitOnThrow),
-    // so each refresh is best-effort and the next sweep repairs. A reply
-    // that handed the thread back also shrank the replying pane's set.
-    // The orchestrator is a deployment identity, not a pane: never a record.
-    if (toPane !== ORCHESTRATOR_MEMBER) { try { refreshPendingStatus(state, toPane); } catch { /* sweep repairs */ } }
-    if (parentHandoff && fromPane !== ORCHESTRATOR_MEMBER) { try { refreshPendingStatus(state, fromPane); } catch { /* sweep repairs */ } }
-    return { message, digests };
-    // commitOnThrow: a rejected send can still carry a verified leader death
-    // and promotion, which must be committed (see withCoordinationLock).
-  }, { commitOnThrow: true });
-  return JSON.stringify({ ok: true, ...result });
-}
-
 function inboxCommand(argv: string[]): string {
+  if (argv[0] === "summary") return inboxSummary(argv.slice(1));
   const subcommand = argv[0];
   if (subcommand === "claim" || subcommand === "close") {
     // il-2t8: claimed and closed were unreachable through the CLI. The
@@ -416,7 +310,7 @@ function inboxCommand(argv: string[]): string {
   const token = requiredToken(parsed);
   const result = withCoordinationLock((state) => {
     assertMemberToken(state, pane, token);
-    const messages = state.messages.filter((message) => message.toPane === pane && (has(parsed, "all") || message.state === "queued" || message.state === "claimed"));
+    const messages = selectInboxMessages(state, parsed, pane);
     const digests = state.digests.filter((digest) => digest.pane === pane);
     // il-yhw: a digest whose delivery file was lost to a partial failure is
     // still the durable record. Repair it inside the lock — the file is
@@ -436,6 +330,18 @@ function inboxCommand(argv: string[]): string {
   if (has(parsed, "json")) return JSON.stringify({ ok: true, pane, messages, digests, redelivered: repaired });
   const lines = [`INBOX ${pane}`, ...messages.map((message) => `#${message.id} ${message.state} ${message.fromPane} -> ${message.toPane}: ${message.text}`), "DIGEST DELIVERIES", ...digests.map((digest) => `#${digest.id} ${digest.reason} messages=${digest.messageIds.map((id) => `#${id}`).join(",")} file=${digest.file}`)];
   return `${lines.join("\n")}\n`;
+}
+
+function selectInboxMessages(state: CoordinationState, parsed: ReturnType<typeof parseArgs>, pane: string): CoordinationMessage[] {
+  const thread = optionalNumber(parsed, "thread");
+  const task = optional(parsed, "task");
+  const history = has(parsed, "all") || thread !== undefined || task !== null;
+  return state.messages.filter((message) => {
+    if (message.toPane !== pane) return false;
+    if (thread !== undefined && message.threadId !== thread) return false;
+    if (task !== null && message.taskId !== task) return false;
+    return history || message.state === "queued" || message.state === "claimed";
+  });
 }
 
 function sessionCommand(argv: string[]): string {
@@ -498,12 +404,11 @@ function compactCommand(): string {
   return JSON.stringify({ ok: true, ...withCoordinationLock((state) => compactTerminalRecords(state)) });
 }
 
-// Drops terminal messages (handled/closed) and digests that no longer cover a
-// retained message. nextMessageId and nextDigestId are never lowered, so the
-// persisted counters remain the id high-water mark even when every record of a
-// kind is removed.
+// Retain task and retry history. Keep counters monotonic when other records expire.
 function compactTerminalRecords(state: CoordinationState): { removedMessages: number; removedDigests: number; keptMessages: number; keptDigests: number } {
-  const keptMessages = state.messages.filter((message) => message.state !== "handled" && message.state !== "closed");
+  // Retain task history and retry threads so receipts retain their reply context.
+  const retainedThreads = new Set(state.messages.filter((message) => message.taskId !== undefined || message.requestId !== undefined).map((message) => message.threadId));
+  const keptMessages = state.messages.filter((message) => retainedThreads.has(message.threadId) || (message.state !== "handled" && message.state !== "closed"));
   const keptIds = new Set(keptMessages.map((message) => message.id));
   const keptDigests = state.digests.filter((digest) => digest.messageIds.some((id) => keptIds.has(id)));
   const removedDigestFiles = state.digests.filter((digest) => !digest.messageIds.some((id) => keptIds.has(id))).map((digest) => digest.file);
@@ -519,33 +424,5 @@ function removeDigestFile(file: string): void {
   try { unlinkSync(file); } catch (error) { if (!isNodeError(error) || error.code !== "ENOENT") throw error; }
 }
 
-function deliverDigests(state: CoordinationState, reason: DigestDelivery["reason"]): DigestDelivery[] {
-  const delivered = new Set(state.digests.flatMap((digest) => digest.messageIds));
-  const byPane = new Map<string, CoordinationMessage[]>();
-  for (const message of state.messages) {
-    if (message.state !== "queued" || delivered.has(message.id)) continue;
-    const messages = byPane.get(message.toPane) ?? []; messages.push(message); byPane.set(message.toPane, messages);
-  }
-  const deliveries: DigestDelivery[] = [];
-  for (const [pane, messages] of byPane) {
-    const session = state.sessions.find((candidate) => candidate.pane === pane);
-    if (!session || session.state !== "idle") continue;
-    const id = state.nextDigestId++;
-    deliveries.push(writeDigestDelivery(state, { id, pane, messageIds: messages.map((message) => message.id), reason, createdAt: new Date().toISOString() }, messages));
-  }
-  return deliveries;
-}
-
-function findTask(state: CoordinationState, id: string): CoordinationTask { const task = state.tasks.find((candidate) => candidate.id === id); if (!task) throw new Error(`unknown task ${id}`); return task; }
-function ownedTask(state: CoordinationState, id: string, pane: string): CoordinationTask { const task = findTask(state, id); if (task.claimer !== pane) throw new Error(`task ${id} is owned by ${task.claimer ?? "nobody"}; pane ${pane} cannot mutate it`); return task; }
-// `--name=value` is a distinct accepted form: a value that itself starts
-// with `--` (legal message text like "--reply 1") survives as the flag's
-// value instead of being re-classified as a following flag.
-function parseArgs(argv: string[]): Map<string, string | true> { const values = new Map<string, string | true>(); for (let index = 0; index < argv.length; index += 1) { const value = argv[index]!; if (!value.startsWith("--")) { values.set(`$${index}`, value); continue; } const eq = value.indexOf("="); if (eq > 2) { values.set(value.slice(2, eq), value.slice(eq + 1)); continue; } const name = value.slice(2); const next = argv[index + 1]; if (next !== undefined && !next.startsWith("--")) { values.set(name, next); index += 1; } else values.set(name, true); } return values; }
-function required(values: Map<string, string | true>, name: string): string { const value = values.get(name); if (typeof value !== "string" || value.trim() === "") throw new Error(`--${name} is required`); return value; }
-function optional(values: Map<string, string | true>, name: string): string | null { const value = values.get(name); return typeof value === "string" && value.trim() !== "" ? value : null; }
-function requiredToken(values: Map<string, string | true>): string { const value = optional(values, "token") ?? process.env.INTERLOCK_PANE_TOKEN; if (value === undefined || value.trim() === "") throw new Error("--token is required (or set INTERLOCK_PANE_TOKEN)"); return value; }
-function optionalNumber(values: Map<string, string | true>, name: string): number | undefined { const value = optional(values, name); if (value === null) return undefined; const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`--${name} must be a positive integer`); return parsed; }
-function has(values: Map<string, string | true>, name: string): boolean { return values.has(name); }
 function isNodeError(error: unknown): error is NodeJS.ErrnoException { return error instanceof Error && "code" in error; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

@@ -40,6 +40,12 @@ export class SqliteLeaseReader implements LeaseReader {
     return contract === undefined ? undefined : this.leaseState(contract);
   }
 
+  pendingLifecycleForBead(beadId: string): Array<{ kind: "completion" | "recovery"; contractId: string }> {
+    const rows = this.database.prepare("SELECT 'completion' AS kind, work_contract_id AS contractId FROM completion_events WHERE bead_id = ? UNION ALL SELECT 'recovery' AS kind, work_contract_id AS contractId FROM recovery_events WHERE bead_id = ?").all(beadId, beadId) as Array<{ kind: "completion" | "recovery"; contractId: string }>;
+    for (const row of rows) if (typeof row.contractId !== "string" || !row.contractId.trim()) throw new Error("pending lifecycle contract ID is corrupt");
+    return rows;
+  }
+
   close(): void { this.database.close(); }
 
   private leaseState(contract: WorkContractRow): LeaseState {

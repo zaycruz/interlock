@@ -1,4 +1,4 @@
-// U2: the MCP server object. The factory registers the five tools and does
+// U2: the MCP server object. The factory registers the worker tools and does
 // nothing else — no transport, no process wiring — so tests can connect a
 // client through an in-memory transport while main.ts owns the stdio binding
 // (the pattern the herdr plugin uses: create, then connect).
@@ -11,16 +11,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 import { TOOL_SPECS } from "./tools.js";
+import { COORDINATION_TOOL_SPECS } from "./coordination-tools.js";
+import { TASK_TOOL_SPECS } from "./task-tools.js";
 import type { McpConfig } from "./config.js";
 
 export function createInterlockMcpServer(config: McpConfig | null, problems: string[], version: string): McpServer {
   const server = new McpServer({ name: "interlock", version });
-  for (const spec of TOOL_SPECS) {
-    server.registerTool(spec.name, { description: spec.description, inputSchema: spec.schema }, async (args: Record<string, unknown>) => {
+  for (const spec of [...TOOL_SPECS, ...TASK_TOOL_SPECS, ...COORDINATION_TOOL_SPECS]) {
+    server.registerTool(spec.name, { description: spec.description, inputSchema: spec.schema, outputSchema: spec.outputSchema, annotations: { readOnlyHint: spec.readOnly ?? false } }, async (args: Record<string, unknown>) => {
       if (config === null) return { isError: true, content: [{ type: "text", text: problems.join("; ") }] };
       return spec.handler(config)(args);
     });
   }
   return server;
 }
-

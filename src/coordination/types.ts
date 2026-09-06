@@ -1,3 +1,4 @@
+import type { TaskContract, TaskExecution, TaskResult } from "../application/linked-types.js";
 import type { ProcessIdentity } from "../core/types.js";
 
 export type TaskStage = "open" | "claimed" | "in-progress" | "blocked" | "done" | "closed";
@@ -5,6 +6,13 @@ export type SessionState = "idle" | "busy" | "done";
 export type MessageStage = "queued" | "claimed" | "handled" | "closed";
 
 export interface CoordinationTask {
+  creator?: string;
+  result?: TaskResult;
+  contract?: TaskContract;
+  execution?: TaskExecution;
+  executionHistory?: TaskExecution[];
+  checkpoint?: string;
+  withdrawalReason?: string;
   id: string;
   title: string;
   businessValue: string;
@@ -19,6 +27,9 @@ export interface CoordinationTask {
 }
 
 export interface CoordinationMessage {
+  taskId?: string;
+  requestId?: string;
+  channelId?: number;
   id: number;
   threadId: number;
   replyTo: number | null;
@@ -99,7 +110,7 @@ export interface OrchestratorState {
 }
 
 export interface CoordinationState {
-  version: 2;
+  version: 3;
   nextMessageId: number;
   nextDigestId: number;
   nextChannelId: number;

@@ -74,7 +74,7 @@ test("versionless legacy state is hard-refused with the same migrate message", (
 test("version-2 state round-trips pods, members, channels, awareness events, and member tokens", () => {
   isolatedState();
   const state = emptyCoordinationState();
-  assert.equal(state.version, 2);
+  assert.equal(state.version, 3);
   state.memberTokens["wT:p1"] = hash("token-wt-p1-secret");
   state.pods.push({ name: "eng", createdAt: NOW, leader: "wT:p1", succession: ["wT:p1", "wT:p2"], status: "open", closedAt: null });
   state.podMembers.push(
@@ -192,7 +192,7 @@ test("orchestrator init mints a token, stores only its hash, and prints it once"
   const raw = readFileSync(coordinationStatePath(), "utf8");
   assert.equal(raw.includes(init.token), false, "the minted token must never be persisted");
   const persisted = JSON.parse(raw);
-  assert.equal(persisted.version, 2);
+  assert.equal(persisted.version, 3);
   assert.match(persisted.memberTokens.orchestrator, /^[a-f0-9]{64}$/);
   assert.equal(typeof persisted.orchestrator.initializedAt, "string");
 
@@ -295,7 +295,7 @@ test("state migrate wraps version-1 panes into one pod and preserves history", (
   assert.deepEqual(migrated.pod.succession, ["wT:p1", "wT:p2"]);
 
   const state = readCoordinationState();
-  assert.equal(state.version, 2);
+  assert.equal(state.version, 3);
   assert.deepEqual(Object.keys(state.memberTokens).sort(), ["orchestrator", "wT:p1", "wT:p2"]);
   assert.equal(state.memberTokens["wT:p1"], hash("legacy-token-wt-p1-secret"));
   assert.equal(state.memberTokens["wT:p2"], hash("legacy-token-wt-p2-secret"));
