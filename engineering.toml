@@ -1,0 +1,118 @@
+version = 1
+
+[project]
+name = "interlock"
+base_ref = "main"
+languages = ["typescript"]
+framework = ""
+
+# Add only commands that this repository already supports. Commands receive:
+# ENGINEERING_CHANGED_FILES (newline-delimited) and ENGINEERING_CHANGED_FILE_COUNT.
+[[checks]]
+id = "format"
+preserve_git_context = true
+phase = "fast"
+severity = "fail"
+command = 'if [ -n "${ENGINEERING_HEAD_REF:-}" ]; then git diff --check "${ENGINEERING_BASE_REF:-HEAD}" "$ENGINEERING_HEAD_REF"; else git diff --check "${ENGINEERING_BASE_REF:-HEAD}"; fi && git diff --check && git diff --cached --check'
+
+[[checks]]
+id = "lint"
+phase = "fast"
+severity = "fail"
+command = "npm run lint"
+
+[[checks]]
+id = "typecheck"
+phase = "fast"
+severity = "fail"
+command = "npm run typecheck"
+
+[[checks]]
+id = "test"
+phase = "full"
+severity = "fail"
+command = "npm run test"
+
+[[checks]]
+id = "complexity"
+phase = "full"
+severity = "fail"
+command = "npm run lint"
+
+[[checks]]
+id = "coverage"
+phase = "full"
+severity = "fail"
+command = ""
+
+[[checks]]
+id = "mutation"
+phase = "full"
+severity = "fail"
+command = ""
+
+[[checks]]
+id = "dead_code"
+phase = "full"
+severity = "fail"
+command = "npm run typecheck -- --noUnusedLocals --noUnusedParameters"
+
+[[checks]]
+id = "duplication"
+phase = "full"
+severity = "fail"
+command = ""
+
+[[checks]]
+id = "architecture"
+phase = "full"
+severity = "fail"
+command = ""
+
+[[checks]]
+id = "security"
+phase = "full"
+severity = "fail"
+command = ""
+
+[[checks]]
+id = "dependencies"
+phase = "full"
+severity = "fail"
+command = "npm audit --audit-level=low"
+
+[[checks]]
+id = "adapter"
+phase = "full"
+severity = "fail"
+command = "npm run test:adapter"
+
+[[checks]]
+id = "governance"
+phase = "fast"
+severity = "fail"
+command = "python3 .engineering/test_scope.py"
+
+[scope]
+compare = "merge-base"
+production_paths = ["src/", "packages/interlock-plugin-herdr/src/"]
+excluded_paths = ["**/*.test.*", "**/*.spec.*", "generated/**"]
+max_modified_production_files = 8
+max_added_or_changed_production_loc = 300
+max_total_added_or_deleted_loc = 500
+max_new_production_modules = 2
+max_new_dependencies = 0
+# This is a ratchet. Existing over-limit files may be edited, but may not grow.
+max_lines_per_new_or_modified_file = 500
+warn_files = 12
+warn_added_lines = 500
+review_files = 20
+review_added_lines = 1000
+dependency_files = ["package.json", "package-lock.json", "pnpm-lock.yaml", "poetry.lock", "requirements*.txt", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock"]
+public_api_paths = ["src/api/", "src/public/", "public/"]
+configuration_paths = [".github/", "infra/", "deploy/"]
+test_paths = ["test/", "packages/interlock-plugin-herdr/test/", ".engineering/test_*.py", "**/*.test.*", "**/*.spec.*"]
+
+# A repository can make a scope signal blocking only after intentional adoption.
+[review]
+require_independent_approval = true

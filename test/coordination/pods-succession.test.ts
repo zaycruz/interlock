@@ -7,7 +7,6 @@ import { afterEach, test } from "node:test";
 import { runCli } from "../../src/cli/index.js";
 import { currentProcessIdentity, inspectProcess } from "../../src/core/process-identity.js";
 import { coordinationStatePath, readCoordinationState, writeCoordinationState } from "../../src/coordination/state.js";
-import type { CoordinationState } from "../../src/coordination/types.js";
 import type { ProcessIdentity } from "../../src/core/types.js";
 
 const NOW = "2026-08-18T00:00:00.000Z";
@@ -387,7 +386,7 @@ test("a worker reporting done keeps full power: no awareness event, no channel i
 test("pod show lists live process bindings for the operator", () => {
   isolatedState();
   const { tokens } = twoPods();
-  const identity = liveIdentity();
+  liveIdentity();
   // Rebind the unbound worker to the calling (test) process's own identity.
   json(runCli(["pod", "rebind", "--member", "wT:p2", "--token", tokens.get("wT:p2")!]));
 

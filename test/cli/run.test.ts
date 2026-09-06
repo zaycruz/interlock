@@ -9,7 +9,7 @@ import { afterEach, test } from "node:test";
 import type { BeadsClient } from "../../src/beads/index.js";
 import { runCli } from "../../src/cli/index.js";
 import type { InterlockMetadata } from "../../src/contracts/index.js";
-import { DEFAULT_STALE_AFTER_MS, existingLeaseDatabasePath, openLeaseStore, type LeaseStore, type ProcessIdentity } from "../../src/core/index.js";
+import { DEFAULT_STALE_AFTER_MS, existingLeaseDatabasePath, openLeaseStore, type LeaseStore } from "../../src/core/index.js";
 import { createTestRepository, type TestRepository } from "../helpers/git-repository.js";
 
 const repositories: TestRepository[] = [];

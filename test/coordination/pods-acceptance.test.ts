@@ -103,7 +103,7 @@ function awareness(): any[] {
 
 test("forgery: a forged leader token cannot send, open channels, or mutate", () => {
   isolatedState();
-  const { tokens } = twoPods();
+  twoPods();
 
   // Intra-pod send with a forged token is rejected at authentication.
   const send = sendWith("forged-leader-token", "wT:p1", "wT:p2", "forged");

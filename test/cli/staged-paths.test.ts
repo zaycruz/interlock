@@ -33,9 +33,12 @@ test("lists both sides of a staged rename", () => {
   assert.deepEqual(stagedPaths(repo.path), ["before.ts", "after.ts"]);
 });
 
-test("lists both sides of a detected staged copy", () => {
+test("a staged copy requires only the changed destination path", () => {
   const repo = repository({ "source.ts": "copy content\n" });
   writeFileSync(join(repo.path, "copy.ts"), "copy content\n");
   execFileSync("git", ["-C", repo.path, "add", "copy.ts"]);
-  assert.deepEqual(stagedPaths(repo.path), ["source.ts", "copy.ts"]);
+  assert.deepEqual(stagedPaths(repo.path), ["copy.ts"]);
+  writeFileSync(join(repo.path, "source.ts"), "modified source\n");
+  execFileSync("git", ["-C", repo.path, "add", "source.ts"]);
+  assert.deepEqual(new Set(stagedPaths(repo.path)), new Set(["source.ts", "copy.ts"]));
 });

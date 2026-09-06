@@ -1,3 +1,5 @@
 dist/
 node_modules/
 .omx/
+.engineering/quality-report.json
+.engineering/__pycache__/

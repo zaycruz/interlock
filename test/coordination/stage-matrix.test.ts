@@ -49,7 +49,7 @@ function addTask(id: string, pane = "wT:p1"): void {
   json(authorized(["task", "add", "--id", id, "--title", `Task ${id}`, "--value", "value", "--pane", pane], pane));
 }
 
-function taskStage(id: string, pane = "wT:p1"): string {
+function taskStage(id: string): string {
   return json(runCli(["task", "list", "--json"])).tasks.find((task: any) => task.id === id).stage;
 }
 
